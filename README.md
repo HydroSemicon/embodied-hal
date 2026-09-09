@@ -63,7 +63,7 @@ i2cdetect -y 1
 リポジトリを取得し、Python 環境を作成します。
 
 ```bash
-git clone https://github.com/taka-k22/embodied-hal.git
+git clone https://github.com/HydroSemicon/embodied-hal.git
 cd embodied-hal
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
