@@ -1,6 +1,8 @@
 const http = require("http");
 
-const ENDPOINT_URL = "http://localhost:3000/touch_sensor_input";
+// Use IPv4 explicitly because the receiver listens on 0.0.0.0.  On systems
+// where localhost resolves to ::1 first, using localhost can time out.
+const ENDPOINT_URL = "http://127.0.0.1:3000/touch_sensor_input";
 const SENSOR_IDS = ["touch_01", "touch_02", "touch_03"];
 const EVENT_TYPES = ["touch_started", "touch_ended"];
 const REQUEST_DELAY_MS = 300;

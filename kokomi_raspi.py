@@ -1,16 +1,20 @@
 # coding: utf-8
-# BME280, MCP3002(CdS), Motor, RGB LED を1つの Flask アプリに統合
+# BME280, MCP3002(CdS), Touch, Motor, RGB LED を1つの Flask アプリに統合
 
 import atexit
+import os
+import queue
 import threading
 import time
 from flask import Flask, request  # type: ignore
 from werkzeug.exceptions import BadRequest  # type: ignore
 import RPi.GPIO as GPIO  # type: ignore
+import requests  # type: ignore
 import spidev  # type: ignore
 from smbus2 import SMBus  # type: ignore
 
 app = Flask(__name__)
+shutdown_event = threading.Event()
 
 
 def is_plain_object(value):
@@ -117,10 +121,27 @@ bme_latest_sensor = {
     "humidity": None,
     "timestamp": None,
 }
+bme_lock = threading.Lock()
+bme_diagnostics = {
+    "chip_id": None,
+    "sample_count": 0,
+    "last_raw": None,
+    "unchanged_samples": 0,
+    "last_sample_monotonic": None,
+    "last_error": None,
+    "last_error_timestamp": None,
+}
 
 bus_number = 1
 i2c_address = 0x76
 bus = SMBus(bus_number)
+
+BME280_EXPECTED_CHIP_ID = 0x60
+BME280_SAMPLE_INTERVAL_SECONDS = 1.0
+BME280_RETRY_INTERVAL_SECONDS = 2.0
+BME280_MEASUREMENT_TIMEOUT_SECONDS = 0.2
+BME280_STALE_AFTER_SECONDS = 3.0
+BME280_UNCHANGED_WARNING_SAMPLES = 10
 
 digT = []
 digP = []
@@ -132,45 +153,39 @@ def bme_write_reg(reg_address, data):
     bus.write_byte_data(i2c_address, reg_address, data)
 
 
+def signed_value(value, bits):
+    sign_bit = 1 << (bits - 1)
+    return value - (1 << bits) if value & sign_bit else value
+
+
 def bme_get_calib_param():
-    calib = []
+    calib_tp = bus.read_i2c_block_data(i2c_address, 0x88, 24)
+    calib_h1 = bus.read_byte_data(i2c_address, 0xA1)
+    calib_h = bus.read_i2c_block_data(i2c_address, 0xE1, 7)
 
-    for i in range(0x88, 0x88 + 24):
-        calib.append(bus.read_byte_data(i2c_address, i))
-    calib.append(bus.read_byte_data(i2c_address, 0xA1))
-    for i in range(0xE1, 0xE1 + 7):
-        calib.append(bus.read_byte_data(i2c_address, i))
+    digT[:] = [
+        (calib_tp[1] << 8) | calib_tp[0],
+        signed_value((calib_tp[3] << 8) | calib_tp[2], 16),
+        signed_value((calib_tp[5] << 8) | calib_tp[4], 16),
+    ]
+    digP[:] = [
+        (calib_tp[7] << 8) | calib_tp[6],
+        *[
+            signed_value((calib_tp[i + 1] << 8) | calib_tp[i], 16)
+            for i in range(8, 24, 2)
+        ],
+    ]
+    digH[:] = [
+        calib_h1,
+        signed_value((calib_h[1] << 8) | calib_h[0], 16),
+        calib_h[2],
+        signed_value((calib_h[3] << 4) | (calib_h[4] & 0x0F), 12),
+        signed_value((calib_h[5] << 4) | (calib_h[4] >> 4), 12),
+        signed_value(calib_h[6], 8),
+    ]
 
-    digT.append((calib[1] << 8) | calib[0])
-    digT.append((calib[3] << 8) | calib[2])
-    digT.append((calib[5] << 8) | calib[4])
-    digP.append((calib[7] << 8) | calib[6])
-    digP.append((calib[9] << 8) | calib[8])
-    digP.append((calib[11] << 8) | calib[10])
-    digP.append((calib[13] << 8) | calib[12])
-    digP.append((calib[15] << 8) | calib[14])
-    digP.append((calib[17] << 8) | calib[16])
-    digP.append((calib[19] << 8) | calib[18])
-    digP.append((calib[21] << 8) | calib[20])
-    digP.append((calib[23] << 8) | calib[22])
-    digH.append(calib[24])
-    digH.append((calib[26] << 8) | calib[25])
-    digH.append(calib[27])
-    digH.append((calib[28] << 4) | (0x0F & calib[29]))
-    digH.append((calib[30] << 4) | ((calib[29] >> 4) & 0x0F))
-    digH.append(calib[31])
-
-    for i in range(1, 2):
-        if digT[i] & 0x8000:
-            digT[i] = (-digT[i] ^ 0xFFFF) + 1
-
-    for i in range(1, 8):
-        if digP[i] & 0x8000:
-            digP[i] = (-digP[i] ^ 0xFFFF) + 1
-
-    for i in range(0, 6):
-        if digH[i] & 0x8000:
-            digH[i] = (-digH[i] ^ 0xFFFF) + 1
+    if digT[0] in (0, 0xFFFF) or digP[0] in (0, 0xFFFF):
+        raise RuntimeError("BME280 calibration data is invalid")
 
 
 def bme_compensate_p(adc_p):
@@ -184,7 +199,7 @@ def bme_compensate_p(adc_p):
     v1 = ((32768 + v1) * digP[0]) / 32768
 
     if v1 == 0:
-        return
+        raise RuntimeError("BME280 pressure calibration caused division by zero")
 
     pressure = ((1048576 - adc_p) - (v2 / 4096)) * 3125
     if pressure < 0x80000000:
@@ -196,7 +211,7 @@ def bme_compensate_p(adc_p):
     v2 = ((pressure / 4.0) * digP[7]) / 8192.0
     pressure = pressure + ((v1 + v2 + digP[6]) / 16.0)
 
-    bme_latest_sensor["pressure"] = pressure / 100
+    return pressure / 100
 
 
 def bme_compensate_t(adc_t):
@@ -206,9 +221,7 @@ def bme_compensate_t(adc_t):
     v2 = (adc_t / 131072.0 - digT[0] / 8192.0) * (adc_t / 131072.0 - digT[0] / 8192.0) * digT[2]
     t_fine = v1 + v2
 
-    temperature = t_fine / 5120.0
-    bme_latest_sensor["temp"] = temperature
-    bme_latest_sensor["timestamp"] = time.time()
+    return t_fine / 5120.0
 
 
 def bme_compensate_h(adc_h):
@@ -217,7 +230,7 @@ def bme_compensate_h(adc_h):
     var_h = t_fine - 76800.0
 
     if var_h == 0:
-        return
+        raise RuntimeError("BME280 humidity calibration is invalid")
 
     var_h = (adc_h - (digH[3] * 64.0 + digH[4] / 16384.0 * var_h)) * (
         digH[1]
@@ -232,28 +245,50 @@ def bme_compensate_h(adc_h):
     elif var_h < 0.0:
         var_h = 0.0
 
-    bme_latest_sensor["humidity"] = var_h
+    return var_h
 
 
 def bme_read_data():
-    data = []
-    for i in range(0xF7, 0xF7 + 8):
-        data.append(bus.read_byte_data(i2c_address, i))
+    # Forced mode creates a fresh conversion for every API sample.  A single
+    # block read then keeps pressure, temperature and humidity from one frame.
+    ctrl_meas_forced = (1 << 5) | (1 << 2) | 1
+    bme_write_reg(0xF4, ctrl_meas_forced)
+    time.sleep(0.015)
+
+    deadline = time.monotonic() + BME280_MEASUREMENT_TIMEOUT_SECONDS
+    while bus.read_byte_data(i2c_address, 0xF3) & 0x08:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("BME280 measurement did not finish")
+        time.sleep(0.002)
+
+    data = bus.read_i2c_block_data(i2c_address, 0xF7, 8)
 
     pres_raw = (data[0] << 12) | (data[1] << 4) | (data[2] >> 4)
     temp_raw = (data[3] << 12) | (data[4] << 4) | (data[5] >> 4)
     hum_raw = (data[6] << 8) | data[7]
 
-    bme_compensate_t(temp_raw)
-    bme_compensate_p(pres_raw)
-    bme_compensate_h(hum_raw)
+    temperature = bme_compensate_t(temp_raw)
+    pressure = bme_compensate_p(pres_raw)
+    humidity = bme_compensate_h(hum_raw)
+
+    if not (-40.0 <= temperature <= 85.0):
+        raise RuntimeError(f"BME280 temperature out of range: {temperature:.2f} C")
+    if not (300.0 <= pressure <= 1100.0):
+        raise RuntimeError(f"BME280 pressure out of range: {pressure:.2f} hPa")
+
+    return {
+        "temp": temperature,
+        "pressure": pressure,
+        "humidity": humidity,
+        "timestamp": time.time(),
+    }, (pres_raw, temp_raw, hum_raw)
 
 
 def bme_setup():
     osrs_t = 1
     osrs_p = 1
     osrs_h = 1
-    mode = 3
+    mode = 0
     t_sb = 5
     bme_filter = 0
     spi3w_en = 0
@@ -262,20 +297,117 @@ def bme_setup():
     config_reg = (t_sb << 5) | (bme_filter << 2) | spi3w_en
     ctrl_hum_reg = osrs_h
 
+    # Configuration can only be changed reliably while the device sleeps.
+    bme_write_reg(0xF4, 0)
     bme_write_reg(0xF2, ctrl_hum_reg)
-    bme_write_reg(0xF4, ctrl_meas_reg)
     bme_write_reg(0xF5, config_reg)
+    bme_write_reg(0xF4, ctrl_meas_reg)
+
+
+def bme_initialize():
+    chip_id = bus.read_byte_data(i2c_address, 0xD0)
+    with bme_lock:
+        bme_diagnostics["chip_id"] = chip_id
+
+    if chip_id != BME280_EXPECTED_CHIP_ID:
+        raise RuntimeError(
+            f"Unexpected chip ID 0x{chip_id:02X}; expected BME280 0x60"
+        )
+
+    bme_write_reg(0xE0, 0xB6)
+    time.sleep(0.005)
+
+    deadline = time.monotonic() + BME280_MEASUREMENT_TIMEOUT_SECONDS
+    while bus.read_byte_data(i2c_address, 0xF3) & 0x01:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("BME280 calibration copy did not finish")
+        time.sleep(0.002)
+
+    bme_get_calib_param()
+    bme_setup()
 
 
 def bme_worker():
-    while True:
-        bme_read_data()
-        time.sleep(1)
+    initialized = False
+
+    while not shutdown_event.is_set():
+        try:
+            if not initialized:
+                bme_initialize()
+                initialized = True
+
+            sample, raw = bme_read_data()
+            now_monotonic = time.monotonic()
+
+            with bme_lock:
+                if raw == bme_diagnostics["last_raw"]:
+                    bme_diagnostics["unchanged_samples"] += 1
+                else:
+                    bme_diagnostics["unchanged_samples"] = 0
+
+                bme_latest_sensor.update(sample)
+                bme_diagnostics["sample_count"] += 1
+                bme_diagnostics["last_raw"] = raw
+                bme_diagnostics["last_sample_monotonic"] = now_monotonic
+                bme_diagnostics["last_error"] = None
+
+        except Exception as exc:
+            initialized = False
+            with bme_lock:
+                bme_diagnostics["last_error"] = f"{type(exc).__name__}: {exc}"
+                bme_diagnostics["last_error_timestamp"] = time.time()
+            print(f"BME280 read failed; retrying: {exc}")
+            shutdown_event.wait(BME280_RETRY_INTERVAL_SECONDS)
+            continue
+
+        shutdown_event.wait(BME280_SAMPLE_INTERVAL_SECONDS)
 
 
 @app.route("/bme280/sensor_data")
 def bme280_sensor_data():
-    return bme_latest_sensor
+    with bme_lock:
+        result = dict(bme_latest_sensor)
+        last_sample = bme_diagnostics["last_sample_monotonic"]
+        error = bme_diagnostics["last_error"]
+        result["sample_count"] = bme_diagnostics["sample_count"]
+        result["unchanged_samples"] = bme_diagnostics["unchanged_samples"]
+
+    age = None if last_sample is None else max(0.0, time.monotonic() - last_sample)
+    result["age_seconds"] = None if age is None else round(age, 3)
+    result["error"] = error
+
+    if error is not None:
+        result["status"] = "error"
+    elif age is None:
+        result["status"] = "starting"
+    elif age > BME280_STALE_AFTER_SECONDS:
+        result["status"] = "stale"
+    elif result["unchanged_samples"] >= BME280_UNCHANGED_WARNING_SAMPLES:
+        result["status"] = "unchanged"
+    else:
+        result["status"] = "ok"
+
+    return result
+
+
+@app.route("/bme280/diagnostics")
+def bme280_diagnostics():
+    with bme_lock:
+        result = dict(bme_diagnostics)
+
+    result.pop("last_sample_monotonic", None)
+    chip_id = result["chip_id"]
+    result["chip_id"] = None if chip_id is None else f"0x{chip_id:02X}"
+    raw = result["last_raw"]
+    if raw is not None:
+        result["last_raw"] = {
+            "pressure": raw[0],
+            "temperature": raw[1],
+            "humidity": raw[2],
+        }
+    result["i2c_bus"] = bus_number
+    result["i2c_address"] = f"0x{i2c_address:02X}"
+    return result
 
 
 # ================================
@@ -323,12 +455,182 @@ def cds_sensor_data():
 
 
 # ================================
+# Capacitive touch sensors
+# ================================
+
+TOUCH_SENSORS = {
+    "touch_01": 5,
+    "touch_02": 6,
+    "touch_03": 13,
+}
+TOUCH_ENDPOINT_URL = os.environ.get(
+    "TOUCH_ENDPOINT_URL",
+    "http://192.168.0.42:3000/touch_sensor_input",
+)
+TOUCH_ACTIVE_HIGH = True
+TOUCH_PULL_UP_DOWN = GPIO.PUD_DOWN
+TOUCH_DEBOUNCE_SECONDS = 0.05
+TOUCH_LOOP_SLEEP_SECONDS = 0.01
+TOUCH_REQUEST_TIMEOUT_SECONDS = 2.0
+TOUCH_REQUEST_ATTEMPTS = 3
+
+touch_event_queue = queue.Queue(maxsize=100)
+touch_lock = threading.Lock()
+touch_status = {
+    "endpoint_url": TOUCH_ENDPOINT_URL,
+    "sensors": {},
+    "last_event": None,
+    "last_error": None,
+    "last_error_timestamp": None,
+}
+
+
+def read_touch_sensor_state(pin):
+    value = GPIO.input(pin)
+    return value == GPIO.HIGH if TOUCH_ACTIVE_HIGH else value == GPIO.LOW
+
+
+def set_touch_error(message):
+    with touch_lock:
+        touch_status["last_error"] = message
+        touch_status["last_error_timestamp"] = time.time()
+
+
+def enqueue_touch_event(sensor_id, event_type):
+    event = {
+        "source": "touch",
+        "type": event_type,
+        "sensor_id": sensor_id,
+    }
+
+    try:
+        touch_event_queue.put_nowait(event)
+    except queue.Full:
+        set_touch_error("Touch event queue is full; event was dropped")
+        print(f"{sensor_id}: {event_type} dropped because the queue is full")
+
+
+def touch_reader_worker():
+    sensor_states = {}
+
+    try:
+        for sensor_id, pin in TOUCH_SENSORS.items():
+            GPIO.setup(pin, GPIO.IN, pull_up_down=TOUCH_PULL_UP_DOWN)
+
+        now = time.monotonic()
+        for sensor_id, pin in TOUCH_SENSORS.items():
+            initial_state = read_touch_sensor_state(pin)
+            sensor_states[sensor_id] = {
+                "pin": pin,
+                "stable_state": initial_state,
+                "last_raw_state": initial_state,
+                "last_raw_change": now,
+            }
+            print(f"{sensor_id}: initial state {'ON' if initial_state else 'OFF'}")
+
+        with touch_lock:
+            touch_status["sensors"] = {
+                sensor_id: {"pin": state["pin"], "touched": state["stable_state"]}
+                for sensor_id, state in sensor_states.items()
+            }
+            touch_status["last_error"] = None
+
+        while not shutdown_event.is_set():
+            now = time.monotonic()
+
+            for sensor_id, state in sensor_states.items():
+                raw_state = read_touch_sensor_state(state["pin"])
+
+                if raw_state != state["last_raw_state"]:
+                    state["last_raw_state"] = raw_state
+                    state["last_raw_change"] = now
+                    continue
+
+                if raw_state == state["stable_state"]:
+                    continue
+
+                if now - state["last_raw_change"] < TOUCH_DEBOUNCE_SECONDS:
+                    continue
+
+                state["stable_state"] = raw_state
+                event_type = "touch_started" if raw_state else "touch_ended"
+                with touch_lock:
+                    touch_status["sensors"][sensor_id]["touched"] = raw_state
+                enqueue_touch_event(sensor_id, event_type)
+
+            shutdown_event.wait(TOUCH_LOOP_SLEEP_SECONDS)
+
+    except Exception as exc:
+        set_touch_error(f"{type(exc).__name__}: {exc}")
+        print(f"Touch sensor reader stopped: {exc}")
+
+
+def touch_sender_worker():
+    while not shutdown_event.is_set():
+        try:
+            event = touch_event_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+
+        last_error = None
+        try:
+            for attempt in range(1, TOUCH_REQUEST_ATTEMPTS + 1):
+                try:
+                    response = requests.post(
+                        TOUCH_ENDPOINT_URL,
+                        json={"event": event},
+                        timeout=TOUCH_REQUEST_TIMEOUT_SECONDS,
+                    )
+                    response.raise_for_status()
+                    with touch_lock:
+                        touch_status["last_event"] = {
+                            **event,
+                            "sent_at": time.time(),
+                            "http_status": response.status_code,
+                        }
+                        touch_status["last_error"] = None
+                    print(
+                        f"{event['sensor_id']}: {event['type']} POST ok "
+                        f"({response.status_code})"
+                    )
+                    last_error = None
+                    break
+                except requests.RequestException as exc:
+                    last_error = (
+                        f"POST attempt {attempt}/{TOUCH_REQUEST_ATTEMPTS} failed: {exc}"
+                    )
+                    if attempt < TOUCH_REQUEST_ATTEMPTS:
+                        shutdown_event.wait(0.25 * attempt)
+
+            if last_error is not None:
+                set_touch_error(last_error)
+                print(f"{event['sensor_id']}: {event['type']} {last_error}")
+        finally:
+            touch_event_queue.task_done()
+
+
+@app.route("/touch/status")
+def touch_sensor_status():
+    with touch_lock:
+        result = {
+            **touch_status,
+            "sensors": {
+                sensor_id: dict(sensor_state)
+                for sensor_id, sensor_state in touch_status["sensors"].items()
+            },
+        }
+    result["queued_events"] = touch_event_queue.qsize()
+    return result
+
+
+# ================================
 # Motor (旧 mitsuki.py)
 # ================================
 
 AIN1 = 20
 AIN2 = 21
 
+GPIO.setwarnings(False)
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(AIN1, GPIO.OUT)
 GPIO.setup(AIN2, GPIO.OUT)
@@ -457,14 +759,19 @@ def home():
         "service": "kokomi_raspi",
         "endpoints": [
             "/bme280/sensor_data",
+            "/bme280/diagnostics",
             "/cds/sensor_data",
+            "/touch/status",
             "/motor/command",
             "/led/command",
         ],
+        "touch_endpoint_url": TOUCH_ENDPOINT_URL,
     }
 
 
 def cleanup():
+    shutdown_event.set()
+
     try:
         spi.close()
     except Exception:
@@ -495,11 +802,10 @@ atexit.register(cleanup)
 
 
 if __name__ == "__main__":
-    bme_setup()
-    bme_get_calib_param()
-
     threading.Thread(target=bme_worker, daemon=True).start()
     threading.Thread(target=cds_worker, daemon=True).start()
+    threading.Thread(target=touch_reader_worker, daemon=True).start()
+    threading.Thread(target=touch_sender_worker, daemon=True).start()
     threading.Thread(target=fade_worker, daemon=True).start()
 
     app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False, threaded=True)

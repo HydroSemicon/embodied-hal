@@ -11,17 +11,17 @@ Raspberry Pi に接続したセンサーとアクチュエーターを、HTTP/JS
 - BNO055 の絶対姿勢と起動時基準の相対姿勢を NDJSON で出力
 - 3つのタッチセンサーのイベントを別ホストへ HTTP POST
 
-統合利用では [`kokomi_raspi.py`](kokomi_raspi.py) を起動します。BME280、CdS、モーター、RGB LED を1つの Flask サーバー（ポート `5000`）で扱えます。
+統合利用では [`kokomi_raspi.py`](kokomi_raspi.py) を起動します。BME280、CdS、3つのタッチセンサー、モーター、RGB LED を1つのプロセスで扱えます。Flask サーバーはポート `5000` で待ち受け、タッチイベントは受信側PCへ HTTP POST します。
 
 ```text
                          Raspberry Pi
   BME280 ── I2C ──┐   ┌──────────────────┐
   CdS ─ MCP3002 ──┼──▶│ kokomi_raspi.py │◀── HTTP/JSON client
-  Motor driver ◀──┤   │     :5000        │
-  RGB LED      ◀──┘   └──────────────────┘
+  Touch sensors ──┤   │     :5000        │──HTTP POST──▶ receiver :3000
+  Motor driver ◀──┤   └──────────────────┘
+  RGB LED      ◀──┘
 
   BNO055 ── I2C ─────▶ bno055_pose.py ─────▶ NDJSON
-  Touch sensors ─────▶ touch_sensor_post.py ─HTTP─▶ receiver :3000
 ```
 
 ## 対象環境
@@ -72,7 +72,7 @@ python -m pip install Flask smbus2 spidev RPi.GPIO requests matplotlib \
   adafruit-blinka adafruit-circuitpython-bno055
 ```
 
-すべての依存パッケージが全スクリプトに必要なわけではありません。統合サーバーだけを使う場合は `Flask`、`smbus2`、`spidev`、`RPi.GPIO` が必要です。
+すべての依存パッケージが全スクリプトに必要なわけではありません。統合サーバーだけを使う場合は `Flask`、`smbus2`、`spidev`、`RPi.GPIO`、`requests` が必要です。
 
 ## 統合サーバーを起動する
 
@@ -80,10 +80,11 @@ python -m pip install Flask smbus2 spidev RPi.GPIO requests matplotlib \
 
 ```bash
 source .venv/bin/activate
+export TOUCH_ENDPOINT_URL="http://192.168.0.42:3000/touch_sensor_input"
 python kokomi_raspi.py
 ```
 
-サーバーは全インターフェースの `5000` 番ポートで待ち受けます。
+`TOUCH_ENDPOINT_URL` は受信側PCの実際のIPアドレスへ変更してください。省略時は上記と同じURLを使います。サーバーは全インターフェースの `5000` 番ポートで待ち受けます。
 
 ```bash
 curl http://localhost:5000/
@@ -104,9 +105,32 @@ curl http://localhost:5000/bme280/sensor_data
   "temp": 24.8,
   "pressure": 1012.6,
   "humidity": 48.3,
-  "timestamp": 1770000000.0
+  "timestamp": 1770000000.0,
+  "sample_count": 42,
+  "unchanged_samples": 0,
+  "age_seconds": 0.31,
+  "status": "ok",
+  "error": null
 }
 ```
+
+`sample_count` が増え、`age_seconds` が概ね3秒未満なら更新中です。未補正値が10回連続で同じ場合は `status` が `unchanged` になります。`status` が `ok` 以外なら次の診断APIを確認します。
+
+#### `GET /bme280/diagnostics`
+
+```bash
+curl http://localhost:5000/bme280/diagnostics
+```
+
+BME280のチップID（正常値は `0x60`）、I²Cバス／アドレス、直近の未補正値、連続して同じ未補正値だった回数、最後のエラーを返します。
+
+#### `GET /touch/status`
+
+```bash
+curl http://localhost:5000/touch/status
+```
+
+3センサーの現在状態、送信先URL、直近の送信成功イベント、送信エラー、キュー内イベント数を返します。
 
 #### `GET /cds/sensor_data`
 
@@ -200,11 +224,7 @@ python bno055_pose.py --rate 50 --diag-rate 1
 
 ## タッチイベントを送受信する
 
-タッチセンサー側の Raspberry Pi では、まず [`touch_sensor_post.py`](touch_sensor_post.py) の `ENDPOINT_URL` を受信側PCのIPアドレスに変更します。
-
-```python
-ENDPOINT_URL = "http://192.168.0.42:3000/touch_sensor_input"
-```
+統合サーバーは BCM GPIO 5 / 6 / 13 を監視し、タッチ開始・終了を `TOUCH_ENDPOINT_URL` へ自動送信します。[`touch_sensor_post.py`](touch_sensor_post.py) は単体動作を確認する場合だけ使用します。統合サーバーと同時には起動しないでください。
 
 受信側PCで、外部パッケージ不要の Node.js サーバーを起動します。
 
@@ -218,7 +238,7 @@ node touch_endpoint_server.js
 node test_touch_endpoint.js
 ```
 
-その後、Raspberry Pi でセンサー読み取りを開始します。
+単体テストの場合だけ、Raspberry Pi で次を実行します。このときは [`touch_sensor_post.py`](touch_sensor_post.py) 内の `ENDPOINT_URL` も受信側PCのIPへ変更してください。
 
 ```bash
 python touch_sensor_post.py
@@ -242,7 +262,7 @@ python touch_sensor_post.py
 
 | ファイル | 説明 | ポート |
 | --- | --- | ---: |
-| `kokomi_raspi.py` | BME280、CdS、モーター、RGB LED の統合サーバー | 5000 |
+| `kokomi_raspi.py` | BME280、CdS、タッチ送信、モーター、RGB LED の統合サーバー | 5000 |
 | `bno055_pose.py` | BNO055 の姿勢を NDJSON で出力 | — |
 | `touch_sensor_post.py` | タッチイベントを HTTP POST | — |
 | `touch_endpoint_server.js` | タッチイベントの受信・検証サーバー | 3000 |
