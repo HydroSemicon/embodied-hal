@@ -1,170 +1,302 @@
-# embodied-hal
+# Kokomi Embodied HAL
 
-Raspberry Pi に接続したセンサーとアクチュエーターを、HTTP/JSON や標準出力から扱うための実験用ハードウェア層です。温湿度・気圧・明るさ・姿勢・タッチの取得と、涙ポンプ用モーター・RGB LED の制御をまとめています。
+![Status](https://img.shields.io/badge/status-research%20prototype-6f42c1)
+![Interface](https://img.shields.io/badge/interface-HTTP%2FJSON-0b7285)
+![Platform](https://img.shields.io/badge/platform-Raspberry%20Pi-c51a4a?logo=raspberrypi&logoColor=white)
+![Runtime](https://img.shields.io/badge/runtime-Python%203-3776ab?logo=python&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
-## 主な機能
+Kokomi Embodied HAL is the Raspberry Pi hardware boundary for the Kokomi embodied-agent research platform. It converts physical sensor signals into stable HTTP resources, translates validated Kernel actions into GPIO/PWM output, and forwards capacitive-touch transitions to Kokomi Kernel as typed events.
 
-- BME280 から温度・気圧・湿度を取得
-- MCP3002 経由で CdS セルの明るさを取得
-- DC モーター（涙ポンプ）を JSON API から制御
-- RGB LED を JSON API から滑らかに色変更
-- BNO055 の絶対姿勢と起動時基準の相対姿勢を NDJSON で出力
-- 3つのタッチセンサーのイベントを別ホストへ HTTP POST
+The service is a deployment-specific hardware adapter, not a general-purpose device framework. Its public contract is the behavior of [`kokomi_raspi.py`](kokomi_raspi.py); superseded drivers and hardware experiments are isolated under [`archives/`](archives/README.md).
 
-統合利用では [`kokomi_raspi.py`](kokomi_raspi.py) を起動します。BME280、CdS、3つのタッチセンサー、モーター、RGB LED を1つのプロセスで扱えます。Flask サーバーはポート `5000` で待ち受け、タッチイベントは受信側PCへ HTTP POST します。
+## System status
 
-```text
-                         Raspberry Pi
-  BME280 ── I2C ──┐   ┌──────────────────┐
-  CdS ─ MCP3002 ──┼──▶│ kokomi_raspi.py │◀── HTTP/JSON client
-  Touch sensors ──┤   │     :5000        │──HTTP POST──▶ receiver :3000
-  Motor driver ◀──┤   └──────────────────┘
-  RGB LED      ◀──┘
-
-  BNO055 ── I2C ─────▶ bno055_pose.py ─────▶ NDJSON
-```
-
-## 対象環境
-
-- Raspberry Pi（GPIO、I2C、SPI を使用）
-- Python 3
-- Node.js（タッチイベント受信サーバー／テストを使う場合のみ）
-
-主に使用するハードウェアは次のとおりです。
-
-| デバイス | 接続・設定 | 用途 |
+| Area | Current state | Operational meaning |
 | --- | --- | --- |
-| BME280 | I2C bus 1、アドレス `0x76` | 温度・気圧・湿度 |
-| MCP3002 + CdS セル | SPI bus 0 / CE0、CH0 | 明るさ（10 bit ADC値） |
-| モータードライバー | BCM GPIO 20 / 21 | 涙ポンプ |
-| RGB LED／ドライバー | BCM GPIO 17 / 27 / 22 | R / G / B PWM出力 |
-| BNO055 | I2C、アドレス `0x28` | 9軸姿勢推定 |
-| タッチセンサー × 3 | BCM GPIO 5 / 6 / 13 | タッチ開始・終了イベント |
+| BME280 environment sensing | Implemented | Forced-mode temperature, pressure, and humidity sampling with health metadata |
+| CdS brightness sensing | Implemented | Raw 10-bit ADC sampling through MCP3002 channel 0 |
+| Capacitive touch | Implemented | Debounced three-channel input forwarded as Kernel touch events |
+| Tear actuator | Implemented | Strict JSON command translated to bounded PWM and duration |
+| RGB LED | Implemented | Strict hexadecimal color command with asynchronous PWM fading |
+| Device diagnostics | Partially implemented | Detailed BME280 and touch status; CdS and actuator diagnostics remain implicit |
+| Authentication and transport security | Not implemented | The HTTP surface is intended for a trusted private network |
+| Nine-axis IMU | Experimental | BNO055 work is archived and is not part of the operational service |
 
-> [!CAUTION]
-> Raspberry Pi の GPIO にモーターを直接接続しないでください。適切なモータードライバー、外部電源、逆起電力対策を使用し、GPIO と各デバイスの電圧・電流仕様を確認してください。
+## Architectural model
 
-## セットアップ
+```mermaid
+flowchart LR
+    subgraph Body["Kokomi physical body"]
+        BME["BME280"]
+        CDS["CdS + MCP3002"]
+        TOUCH["Touch sensors"]
+        MOTOR["Tear actuator"]
+        LED["RGB LED"]
+    end
 
-Raspberry Pi の I2C と SPI を有効にします。
+    subgraph HAL["Kokomi Embodied HAL · Raspberry Pi"]
+        SAMPLE["Sensor workers"]
+        STATE["Latest sample and diagnostics"]
+        API["Flask HTTP boundary · :5000"]
+        QUEUE["Touch event queue"]
+        PWM["Actuator and fade control"]
+    end
 
-```bash
-sudo raspi-config
+    KERNEL["Kokomi Kernel · :3000"]
+
+    BME --> SAMPLE
+    CDS --> SAMPLE
+    SAMPLE --> STATE
+    STATE --> API
+    TOUCH --> QUEUE
+    QUEUE -->|"POST /touch_sensor_input"| KERNEL
+    KERNEL -->|"poll"| API
+    KERNEL -->|"tear / led_change"| API
+    API --> PWM
+    PWM --> MOTOR
+    PWM --> LED
 ```
 
-`Interface Options` から I2C と SPI を有効にした後、再起動してください。接続確認には次のコマンドを利用できます。
+### Authority boundaries
 
-```bash
-sudo apt update
-sudo apt install -y python3-venv python3-pip i2c-tools
-i2cdetect -y 1
-```
+- The HAL owns GPIO, I2C, SPI, PWM, device sampling, debounce, and local device-health state.
+- Kokomi Kernel owns persistent observations, freshness policy beyond the transport response, world-state derivation, action authorization, cooldowns, and outcome history.
+- Sensor resources report measurements and adapter health; they do not infer emotional or semantic state.
+- The HAL validates the complete actuator payload again even when the request originated from the Kernel action gate.
+- A successful actuator response means the local command completed according to the adapter; broader physical effects are not independently sensed.
 
-リポジトリを取得し、Python 環境を作成します。
+## Runtime composition
 
-```bash
-git clone https://github.com/HydroSemicon/embodied-hal.git
-cd embodied-hal
-python3 -m venv --system-site-packages .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install Flask smbus2 spidev RPi.GPIO requests matplotlib \
-  adafruit-blinka adafruit-circuitpython-bno055
-```
+The operational repository surface is intentionally small.
 
-すべての依存パッケージが全スクリプトに必要なわけではありません。統合サーバーだけを使う場合は `Flask`、`smbus2`、`spidev`、`RPi.GPIO`、`requests` が必要です。
+| Path | Responsibility |
+| --- | --- |
+| `kokomi_raspi.py` | Flask service, sensor workers, touch forwarding, actuator validation, PWM control, and resource cleanup |
+| `README.md` | Current hardware and protocol contract |
+| `LICENSE` | MIT license terms |
+| `.gitignore` | Exclusion of generated Python caches and local virtual environments |
+| `archives/` | Non-operational experiments, superseded adapters, diagnostics, and implementation prompts |
 
-## 統合サーバーを起動する
+The service binds to `0.0.0.0:5000` and uses Flask's threaded request handling. Device objects and PWM channels are created during module initialization. Background workers start when the module is executed as the main program.
 
-配線と I2C／SPI の有効化を確認してから、Raspberry Pi 上で実行します。
+## Physical bindings
 
-```bash
-source .venv/bin/activate
-export TOUCH_ENDPOINT_URL="http://192.168.0.42:3000/touch_sensor_input"
-python kokomi_raspi.py
-```
+All GPIO identifiers use Broadcom SOC numbering rather than physical header-pin numbers.
 
-`TOUCH_ENDPOINT_URL` は受信側PCの実際のIPアドレスへ変更してください。省略時は上記と同じURLを使います。サーバーは全インターフェースの `5000` 番ポートで待ち受けます。
+| Function | Device binding | Electrical/software mode |
+| --- | --- | --- |
+| Environment | BME280 at I2C bus `1`, address `0x76` | Forced conversion, 1× temperature/pressure/humidity oversampling |
+| Brightness | MCP3002 at SPI bus `0`, CE0, channel `0` | 100 kHz SPI, raw 10-bit result |
+| Tear actuator AIN1 | BCM GPIO `20` | 100 Hz PWM |
+| Tear actuator AIN2 | BCM GPIO `21` | 100 Hz PWM, held at 0 during forward motion |
+| RGB red | BCM GPIO `17` | 1 kHz PWM |
+| RGB green | BCM GPIO `27` | 1 kHz PWM |
+| RGB blue | BCM GPIO `22` | 1 kHz PWM |
+| Touch `touch_01` | BCM GPIO `5` | Active-high input with pull-down |
+| Touch `touch_02` | BCM GPIO `6` | Active-high input with pull-down |
+| Touch `touch_03` | BCM GPIO `13` | Active-high input with pull-down |
 
-```bash
-curl http://localhost:5000/
-```
+The motor interface assumes an external motor driver. The GPIO pins are control signals and are not a motor power source.
 
-### センサー API
+## Runtime workers
 
-#### `GET /bme280/sensor_data`
+| Worker | Cadence | Behavior |
+| --- | ---: | --- |
+| BME280 sampler | 1 s after each completed cycle | Reinitializes after an error and retries after 2 s |
+| CdS sampler | 1 s | Replaces the latest raw ADC value and timestamp |
+| Touch reader | 10 ms | Debounces state changes for 50 ms and enqueues transitions |
+| Touch sender | Event-driven | Delivers queued events with bounded retry |
+| RGB fade | 30 ms | Moves each channel by 2 percentage points toward its target |
 
-```bash
-curl http://localhost:5000/bme280/sensor_data
-```
+The touch queue holds at most 100 events. A full queue drops the new event and records an adapter error. Delivery uses a 2-second request timeout, up to three attempts, and linear retry delays of 250 ms and 500 ms.
 
-レスポンス例:
+## Configuration contract
+
+| Name | Default | Semantics |
+| --- | --- | --- |
+| `TOUCH_ENDPOINT_URL` | `http://192.168.0.42:3000/touch_sensor_input` | Complete Kernel URL receiving touch envelopes |
+
+All other hardware bindings and timing constants are currently code-level configuration in `kokomi_raspi.py`.
+
+## HTTP surface
+
+| Method | Route | Function |
+| --- | --- | --- |
+| GET | `/` | Service identity, route inventory, and configured touch target |
+| GET | `/bme280/sensor_data` | Latest compensated environment sample and health state |
+| GET | `/bme280/diagnostics` | BME280 identity, raw sample counters, and error diagnostics |
+| GET | `/cds/sensor_data` | Latest raw brightness sample |
+| GET | `/touch/status` | Touch input, delivery, and queue status |
+| POST | `/motor/command` | Synchronous tear-actuator command |
+| POST | `/led/command` | Asynchronous RGB target-color command |
+
+Flask serializes returned mappings as JSON. The service does not expose authentication, authorization, CORS policy, or TLS termination.
+
+## Sensor contracts
+
+### Environment sample
+
+`GET /bme280/sensor_data` returns:
 
 ```json
 {
   "temp": 24.8,
   "pressure": 1012.6,
   "humidity": 48.3,
-  "timestamp": 1770000000.0,
+  "timestamp": 1780000000.0,
   "sample_count": 42,
   "unchanged_samples": 0,
   "age_seconds": 0.31,
-  "status": "ok",
-  "error": null
+  "error": null,
+  "status": "ok"
 }
 ```
 
-`sample_count` が増え、`age_seconds` が概ね3秒未満なら更新中です。未補正値が10回連続で同じ場合は `status` が `unchanged` になります。`status` が `ok` 以外なら次の診断APIを確認します。
+| Field | Type | Semantics |
+| --- | --- | --- |
+| `temp` | number or `null` | Compensated temperature in degrees Celsius |
+| `pressure` | number or `null` | Compensated pressure in hPa |
+| `humidity` | number or `null` | Compensated relative humidity in percent, clamped to `0..100` |
+| `timestamp` | number or `null` | Unix wall-clock time of the latest valid sample |
+| `sample_count` | integer | Valid samples accepted since process start |
+| `unchanged_samples` | integer | Consecutive valid samples whose complete raw tuple matches the previous tuple |
+| `age_seconds` | number or `null` | Monotonic age of the latest valid sample |
+| `error` | string or `null` | Latest BME280 initialization or sampling error |
+| `status` | enum | `error`, `starting`, `stale`, `unchanged`, or `ok` |
 
-#### `GET /bme280/diagnostics`
+Status precedence is deterministic:
 
-```bash
-curl http://localhost:5000/bme280/diagnostics
+1. `error` when a current adapter error exists.
+2. `starting` before the first valid sample.
+3. `stale` when the latest sample is older than 3 seconds.
+4. `unchanged` after at least 10 repeated raw samples.
+5. `ok` otherwise.
+
+The adapter accepts temperature only within `-40..85 °C` and pressure only within `300..1100 hPa`. Invalid readings enter the retry path and do not replace the latest valid sample.
+
+### BME280 diagnostics
+
+`GET /bme280/diagnostics` returns:
+
+```json
+{
+  "chip_id": "0x60",
+  "sample_count": 42,
+  "last_raw": {
+    "pressure": 415148,
+    "temperature": 519888,
+    "humidity": 28754
+  },
+  "unchanged_samples": 0,
+  "last_error": null,
+  "last_error_timestamp": null,
+  "i2c_bus": 1,
+  "i2c_address": "0x76"
+}
 ```
 
-BME280のチップID（正常値は `0x60`）、I²Cバス／アドレス、直近の未補正値、連続して同じ未補正値だった回数、最後のエラーを返します。
+The expected chip ID is `0x60`. `last_raw` and `chip_id` are `null` until available. Raw values are uncompensated register readings and are diagnostic data, not physical units.
 
-#### `GET /touch/status`
+### Brightness sample
 
-```bash
-curl http://localhost:5000/touch/status
-```
-
-3センサーの現在状態、送信先URL、直近の送信成功イベント、送信エラー、キュー内イベント数を返します。
-
-#### `GET /cds/sensor_data`
-
-```bash
-curl http://localhost:5000/cds/sensor_data
-```
-
-レスポンス例:
+`GET /cds/sensor_data` returns:
 
 ```json
 {
   "cds": 512,
-  "timestamp": 1770000000.0
+  "timestamp": 1780000000.0
 }
 ```
 
-`cds` は MCP3002 の ADC 値（`0`〜`1023`）です。明暗との対応は CdS セルの分圧回路によって変わります。
+`cds` is an MCP3002 result in the inclusive range `0..1023`. It has no physical unit; the direction and transfer function depend on the external CdS voltage-divider circuit. Both fields are `null` before the first sample.
 
-### アクチュエーター API
+### Touch status
 
-どちらのエンドポイントも `Content-Type: application/json` が必須です。未定義フィールドを含むリクエストや、型・範囲が不正な値は HTTP `400` になります。
+`GET /touch/status` returns:
 
-#### `POST /motor/command`
-
-```bash
-curl -X POST http://localhost:5000/motor/command \
-  -H 'Content-Type: application/json' \
-  -d '{"type":"tear","params":{"speed":10,"duration":5}}'
+```json
+{
+  "endpoint_url": "http://kernel.local:3000/touch_sensor_input",
+  "sensors": {
+    "touch_01": { "pin": 5, "touched": false },
+    "touch_02": { "pin": 6, "touched": true },
+    "touch_03": { "pin": 13, "touched": false }
+  },
+  "last_event": {
+    "source": "touch",
+    "type": "touch_started",
+    "sensor_id": "touch_02",
+    "sent_at": 1780000000.0,
+    "http_status": 200
+  },
+  "last_error": null,
+  "last_error_timestamp": null,
+  "queued_events": 0
+}
 ```
 
-- `speed`: `0`〜`255` の整数。PWM デューティ比 `40`〜`100%` に変換されます。
-- `duration`: `0`〜`255` の整数（秒）。
+`sensors` is initially empty until the reader worker initializes. `last_event` describes the most recent successful delivery and is initially `null`. `last_error` records GPIO initialization, queue overflow, or the most recent exhausted HTTP delivery error.
 
-レスポンス例:
+## Outbound touch contract
+
+For every debounced transition, the HAL posts the following strict envelope to `TOUCH_ENDPOINT_URL`:
+
+```json
+{
+  "event": {
+    "source": "touch",
+    "type": "touch_started",
+    "sensor_id": "touch_01"
+  }
+}
+```
+
+| Field | Allowed value |
+| --- | --- |
+| `event.source` | `touch` |
+| `event.type` | `touch_started` or `touch_ended` |
+| `event.sensor_id` | `touch_01`, `touch_02`, or `touch_03` |
+
+Any non-2xx response is treated as a failed attempt. Events are removed from the local queue after success or after all attempts fail; there is no durable retry store.
+
+## Actuator command contract
+
+Both actuator routes require `Content-Type: application/json`, a top-level JSON object, exact key sets, and exact parameter types. Missing keys, extra keys, invalid JSON, invalid values, arrays, and scalar bodies return HTTP `400`:
+
+```json
+{
+  "error": "validation message"
+}
+```
+
+### Tear actuator
+
+`POST /motor/command` accepts exactly:
+
+```json
+{
+  "type": "tear",
+  "params": {
+    "speed": 10,
+    "duration": 5
+  }
+}
+```
+
+| Parameter | Contract |
+| --- | --- |
+| `type` | Exact string `tear` |
+| `speed` | Integer `0..255`; booleans and floating-point values are rejected |
+| `duration` | Integer `0..255` seconds; booleans and floating-point values are rejected |
+
+The PWM conversion is:
+
+```text
+duty_percent = 40 + (speed / 255) × 60
+```
+
+AIN1 receives the computed duty and AIN2 remains at zero. The request handler waits for `duration` seconds, stops both motor PWM outputs, and then returns:
 
 ```json
 {
@@ -176,19 +308,33 @@ curl -X POST http://localhost:5000/motor/command \
 }
 ```
 
-このリクエストは、指定時間のモーター動作が完了してから応答します。
+Validation failure explicitly stops the motor before returning. A `speed` value of `0` currently maps to 40% duty; it does not mean zero output. Concurrent motor commands are not serialized by the HAL.
 
-#### `POST /led/command`
+### RGB LED
 
-```bash
-curl -X POST http://localhost:5000/led/command \
-  -H 'Content-Type: application/json' \
-  -d '{"type":"led_change","params":{"color":"#00FF00"}}'
+`POST /led/command` accepts exactly:
+
+```json
+{
+  "type": "led_change",
+  "params": {
+    "color": "#00FF00"
+  }
+}
 ```
 
-`color` は `#RRGGBB` 形式で指定します。各チャンネルは `0`〜`100%` の PWM デューティ比に変換され、現在色から目標色へ徐々に遷移します。
+| Parameter | Contract |
+| --- | --- |
+| `type` | Exact string `led_change` |
+| `color` | Seven-character `#RRGGBB` hexadecimal string |
 
-レスポンス例:
+Each 8-bit channel is converted to PWM percent, rounded to one decimal place:
+
+```text
+pwm_percent = round(channel / 255 × 100, 1)
+```
+
+The route updates the target color and returns immediately; the fade worker applies the physical transition asynchronously.
 
 ```json
 {
@@ -203,92 +349,29 @@ curl -X POST http://localhost:5000/led/command \
 }
 ```
 
-## BNO055 の姿勢を取得する
+The returned color is normalized to uppercase. The physical interpretation assumes a non-inverted PWM path; common-anode or active-low hardware requires an adapter change.
 
-[`bno055_pose.py`](bno055_pose.py) は BNO055 を NDOF モードで動かし、1行1 JSON の NDJSON を標準出力へ送ります。最初に取得できた姿勢が相対姿勢の基準（ゼロ点）になります。
+## Lifecycle and failure semantics
 
-```bash
-python bno055_pose.py --rate 50 --diag-rate 1
-```
+- BME280 failures are retained in diagnostics, and initialization is retried without discarding the last valid sample.
+- CdS sampling has no local retry or diagnostic state; an uncaught SPI error terminates that worker.
+- Touch input and HTTP delivery are decoupled so network latency does not block GPIO sampling.
+- Touch delivery is best-effort and memory-only; process exit loses queued events.
+- Motor execution is synchronous per request and always ends with `motor_stop()` on the normal success path.
+- LED commands are target updates; successful HTTP return does not wait for the fade to finish.
+- Process cleanup closes SPI and I2C handles, stops motor and LED PWM objects, and calls `GPIO.cleanup()`.
 
-主なオプション:
+## Safety invariants
 
-| オプション | 既定値 | 説明 |
-| --- | ---: | --- |
-| `--rate` | `50` | 姿勢の出力レート（Hz） |
-| `--diag-rate` | `1` | 診断情報の取得レート（Hz） |
-| `--calibration-file` | `bno055_calibration.json` | キャリブレーションの保存先 |
-| `--no-load-calibration` | 無効 | 保存済みキャリブレーションを読み込まない |
-
-標準出力には絶対／相対クォータニオンと相対 roll・pitch・yaw が含まれます。診断タイミングではジャイロ、加速度、重力、磁気、温度、キャリブレーション状態も追加されます。全キャリブレーション値が `3` になるとデータを自動保存します。
-
-## タッチイベントを送受信する
-
-統合サーバーは BCM GPIO 5 / 6 / 13 を監視し、タッチ開始・終了を `TOUCH_ENDPOINT_URL` へ自動送信します。[`touch_sensor_post.py`](touch_sensor_post.py) は単体動作を確認する場合だけ使用します。統合サーバーと同時には起動しないでください。
-
-受信側PCで、外部パッケージ不要の Node.js サーバーを起動します。
-
-```bash
-node touch_endpoint_server.js
-```
-
-別のターミナルから擬似イベントで疎通確認できます。
-
-```bash
-node test_touch_endpoint.js
-```
-
-単体テストの場合だけ、Raspberry Pi で次を実行します。このときは [`touch_sensor_post.py`](touch_sensor_post.py) 内の `ENDPOINT_URL` も受信側PCのIPへ変更してください。
-
-```bash
-python touch_sensor_post.py
-```
-
-送信されるイベントの例:
-
-```json
-{
-  "event": {
-    "source": "touch",
-    "type": "touch_started",
-    "sensor_id": "touch_01"
-  }
-}
-```
-
-`type` は `touch_started` または `touch_ended`、`sensor_id` は `touch_01`〜`touch_03` です。
-
-## スクリプト一覧
-
-| ファイル | 説明 | ポート |
-| --- | --- | ---: |
-| `kokomi_raspi.py` | BME280、CdS、タッチ送信、モーター、RGB LED の統合サーバー | 5000 |
-| `bno055_pose.py` | BNO055 の姿勢を NDJSON で出力 | — |
-| `touch_sensor_post.py` | タッチイベントを HTTP POST | — |
-| `touch_endpoint_server.js` | タッチイベントの受信・検証サーバー | 3000 |
-| `test_touch_endpoint.js` | タッチ受信サーバーの疎通テスト | — |
-| `bme280-flask.py` | BME280 単体の Flask サーバー | 5001 |
-| `bme280-plot.py` | BME280 の気圧をリアルタイム表示 | — |
-| `cds_cell_basic.py` | CdS の ADC 値を標準出力へ表示 | — |
-| `cds_cell_flask.py` | CdS 単体の Flask サーバー | 5003 |
-| `motor_basic.py` | モーターの正転・停止・逆転デモ | — |
-| `motor_stdio_tear.py` | 標準入力の `tear` でモーターを駆動 | — |
-| `motor_flask_tear.py` | `tear` コマンド用の簡易 Flask API | 5000 |
-| `rgb_led_basic.py` | RGB LED の色切り替えデモ | — |
-| `rgb_led_flask.py` | 旧形式コマンド用の RGB LED Flask API | 5002 |
-| `mitsuki.py` | 旧形式コマンド用のモーター Flask API | 5000 |
-| `flask_debug.py` | POSTされた生データを確認するデバッグサーバー | 5000 |
-
-`mitsuki.py` と `rgb_led_flask.py` は旧HEXコマンド形式の検証用です。新しい実装では JSON API の `kokomi_raspi.py` を使用してください。
-
-## 注意事項
-
-- 複数のスクリプトが同じ GPIO、I2C、SPI、またはポートを使用します。同じデバイスを扱うスクリプトは同時に起動しないでください。
-- HTTP サーバーに認証や TLS はありません。信頼できるローカルネットワーク内で使用してください。
-- GPIO 番号は物理ピン番号ではなく BCM 番号です。
-- RGB LED の極性やドライバー回路によっては、PWM 値の反転が必要です。
-- 実機を動かす前に低い出力・短い時間から試し、非常停止できる状態で確認してください。
+1. Malformed or unknown actuator fields do not reach PWM control.
+2. An invalid tear command forces both motor PWM channels to zero.
+3. BME280 identity must match chip ID `0x60` before samples are accepted.
+4. Out-of-range BME280 temperature and pressure readings are rejected.
+5. Touch state changes must remain stable for 50 ms before an event is emitted.
+6. The touch queue is bounded; overload becomes explicit diagnostic state rather than unbounded memory growth.
+7. Device resources and PWM outputs are released during registered process cleanup.
+8. Network access must be restricted externally because the service itself has no authentication or encryption.
 
 ## License
 
-[MIT License](LICENSE)
+The repository is licensed under the [MIT License](LICENSE).
