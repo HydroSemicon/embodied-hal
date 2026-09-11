@@ -1,6 +1,7 @@
 # Kokomi Embodied HAL
 
 ![Status](https://img.shields.io/badge/status-research%20prototype-6f42c1)
+[![CI](https://github.com/HydroSemicon/embodied-hal/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/HydroSemicon/embodied-hal/actions/workflows/ci.yml?query=branch%3Amain)
 ![Interface](https://img.shields.io/badge/interface-HTTP%2FJSON-0b7285)
 ![Platform](https://img.shields.io/badge/platform-Raspberry%20Pi-c51a4a?logo=raspberrypi&logoColor=white)
 ![Runtime](https://img.shields.io/badge/runtime-Python%203-3776ab?logo=python&logoColor=white)
@@ -371,6 +372,17 @@ The returned color is normalized to uppercase. The physical interpretation assum
 6. The touch queue is bounded; overload becomes explicit diagnostic state rather than unbounded memory growth.
 7. Device resources and PWM outputs are released during registered process cleanup.
 8. Network access must be restricted externally because the service itself has no authentication or encryption.
+
+## Verification contract
+
+GitHub Actions checks every pull request and every push to `main`. The CI contract includes:
+
+- Ruff static analysis of the operational service and tests;
+- bytecode compilation as a Python syntax check;
+- pytest coverage of route discovery, initial sensor resources, strict actuator validation, motor shutdown, and RGB conversion;
+- hardware-module stubs that prevent CI from accessing GPIO, I2C, or SPI.
+
+These checks validate software contracts only. They do not certify physical wiring, sensor accuracy, PWM output, timing under load, or network delivery to Kokomi Kernel.
 
 ## License
 
