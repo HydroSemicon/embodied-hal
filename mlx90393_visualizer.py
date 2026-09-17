@@ -12,7 +12,7 @@ import numpy as np # type: ignore
 import requests # type: ignore
 from scipy.optimize import least_squares # type: ignore
 
-import matplotlib
+import matplotlib # type: ignore
 matplotlib.use("TkAgg")
 
 import matplotlib.pyplot as plt # type: ignore
