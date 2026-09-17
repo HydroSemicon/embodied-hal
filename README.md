@@ -22,7 +22,7 @@ The service is a deployment-specific hardware adapter, not a general-purpose dev
 | RGB LED | Implemented | Strict hexadecimal color command with asynchronous PWM fading |
 | Device diagnostics | Partially implemented | Detailed BME280 and touch status; CdS and actuator diagnostics remain implicit |
 | Authentication and transport security | Not implemented | The HTTP surface is intended for a trusted private network |
-| Nine-axis IMU | Experimental | BNO055 work is archived and is not part of the operational service |
+| Nine-axis IMU | Optional tool | BNO055 pose is streamed at up to 100 Hz to a browser-based 3D monitor |
 
 ## Architectural model
 
@@ -80,6 +80,54 @@ The operational repository surface is intentionally small.
 | `archives/` | Non-operational experiments, superseded adapters, diagnostics, and implementation prompts |
 
 The service binds to `0.0.0.0:5000` and uses Flask's threaded request handling. Device objects and PWM channels are created during module initialization. Background workers start when the module is executed as the main program.
+
+## MLX90393 remote visualizer
+
+The optional MLX90393 tools separate high-rate sensor acquisition from GUI rendering. The Raspberry Pi samples I2C in a dedicated thread and exposes a persistent newline-delimited JSON stream. The Windows client receives every available sample in a background thread, while Matplotlib redraws independently at 30 FPS. Slow GUI frames therefore do not slow the sensor loop.
+
+```mermaid
+flowchart LR
+    SENSOR["MLX90393 · I2C"] -->|"target 200 Hz"| PI["Raspberry Pi sampler"]
+    PI -->|"HTTP NDJSON · :5001"| CLIENT["Windows receive thread"]
+    CLIENT --> HISTORY["full-rate history"]
+    CLIENT -->|"latest sample"| GUI["Matplotlib GUI · 30 FPS"]
+```
+
+On the Raspberry Pi:
+
+```bash
+python3 -m pip install -r requirements-mlx90393-server.txt
+python3 mlx90393_sensor_server.py --sample-hz 200
+```
+
+On Windows, launch the batch file from PowerShell or Explorer. It creates `.venv` and installs the client dependencies automatically on the first run, without activating a PowerShell script:
+
+```powershell
+.\run_mlx90393_visualizer.bat
+```
+
+To specify the Pi by IP address:
+
+```powershell
+.\run_mlx90393_visualizer.bat --url http://192.168.0.123:5001
+```
+
+The batch file invokes `.venv\Scripts\python.exe` directly, so PowerShell's script execution policy does not need to be changed.
+
+Open `http://raspberrypi.local:5001/api/status` to check the Pi without starting the GUI. The GUI shows the measured acquisition rate and sequence gaps as `dropped`. The Flask development server is suitable for this trusted-LAN prototype; the stream has no authentication or TLS and must not be exposed to an untrusted network.
+
+## BNO055 browser pose monitor
+
+The optional BNO055 tool samples the fused quaternion in a dedicated Raspberry Pi thread and streams only pose data over persistent NDJSON. Its built-in browser page draws a thin 3D board without a Windows Python client or external JavaScript dependency. This board defaults to the BNO055 internal oscillator. Boot-relative visualization defaults to magnetometer-free IMUPLUS fusion and confirms isolated jumps over 8 degrees before display to suppress one-sample pose twitches.
+
+On the Raspberry Pi:
+
+```bash
+python3 -m pip install -r requirements-bno055-server.txt
+python3 bno055_pose.py --sample-hz 100
+```
+
+On Windows, open `http://192.168.0.118:5002/` in Chrome or Edge. Flask serves the viewer HTML and its Web Worker JavaScript from the Raspberry Pi, so no client files or Python environment are needed on Windows. Sensor data is capped at 100 Hz by the BNO055 fusion output; rendering follows the display refresh rate and therefore reaches approximately 60 or 120 FPS on a matching display. See [`bno055_setup.md`](bno055_setup.md) for setup, calibration behavior, and command options.
 
 ## Physical bindings
 

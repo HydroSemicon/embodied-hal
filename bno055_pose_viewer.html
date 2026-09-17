@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BNO055 Pose Monitor</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, "Segoe UI", system-ui, sans-serif;
+      --bg: #071016;
+      --panel: rgba(15, 29, 38, .82);
+      --line: rgba(169, 215, 229, .15);
+      --muted: #8da5af;
+      --text: #edf7f8;
+      --cyan: #5ee8e0;
+      --green: #6ee7a7;
+      --red: #ff7676;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      overflow: hidden;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 65% 35%, rgba(31, 115, 126, .18), transparent 36%),
+        linear-gradient(145deg, #09151d, var(--bg) 60%);
+    }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: minmax(255px, 320px) 1fr;
+    }
+
+    aside {
+      z-index: 2;
+      padding: 28px;
+      border-right: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(9, 20, 27, .96), rgba(9, 20, 27, .72));
+      backdrop-filter: blur(12px);
+      overflow-y: auto;
+    }
+
+    .eyebrow {
+      margin: 0 0 7px;
+      color: var(--cyan);
+      font: 700 11px/1.2 ui-monospace, monospace;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+    }
+
+    h1 { margin: 0; font-size: 24px; font-weight: 650; letter-spacing: -.02em; }
+    .sub { margin: 8px 0 25px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 25px;
+      font: 600 12px/1 ui-monospace, monospace;
+      color: var(--muted);
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: #62717a;
+      box-shadow: 0 0 0 4px rgba(98, 113, 122, .12);
+    }
+
+    .status.online .dot { background: var(--green); box-shadow: 0 0 0 4px rgba(110, 231, 167, .12), 0 0 16px var(--green); }
+    .status.error .dot { background: var(--red); box-shadow: 0 0 0 4px rgba(255, 118, 118, .12); }
+    .status span:last-child { min-width: 0; line-height: 1.45; overflow-wrap: anywhere; }
+
+    .section-title {
+      margin: 22px 0 10px;
+      color: #718b96;
+      font: 700 10px/1.2 ui-monospace, monospace;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .metric, .angles, .calibration {
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--panel);
+    }
+
+    .metric { padding: 11px 12px; }
+    .metric span { display: block; color: var(--muted); font-size: 10px; }
+    .metric strong { display: block; margin-top: 4px; font: 600 17px/1.1 ui-monospace, monospace; }
+    .metric strong small { color: var(--muted); font-size: 10px; font-weight: 500; }
+
+    .angles { padding: 5px 13px; }
+    .angle-row, .cal-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .angle-row:last-child, .cal-row:last-child { border-bottom: 0; }
+    .angle-row span, .cal-row span { color: var(--muted); font-size: 11px; }
+    .angle-row strong { font: 600 14px/1 ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+    .calibration { padding: 5px 13px; }
+    .bars { display: flex; gap: 3px; }
+    .bar { width: 15px; height: 5px; border-radius: 1px; background: #293b43; }
+    .bar.on { background: var(--cyan); box-shadow: 0 0 7px rgba(94, 232, 224, .4); }
+
+    button {
+      width: 100%;
+      margin-top: 18px;
+      padding: 11px 13px;
+      border: 1px solid rgba(94, 232, 224, .4);
+      border-radius: 8px;
+      color: var(--cyan);
+      background: rgba(94, 232, 224, .07);
+      font: 650 12px/1 system-ui, sans-serif;
+      cursor: pointer;
+      transition: background .15s, transform .15s;
+    }
+    button:hover { background: rgba(94, 232, 224, .14); }
+    button:active { transform: translateY(1px); }
+
+    main { position: relative; min-width: 0; }
+    canvas { display: block; width: 100%; height: 100vh; }
+
+    .axis-key {
+      position: absolute;
+      right: 22px;
+      bottom: 20px;
+      display: flex;
+      gap: 13px;
+      color: var(--muted);
+      font: 600 10px/1 ui-monospace, monospace;
+    }
+    .axis-key i { display: inline-block; width: 15px; height: 2px; margin: 0 5px 3px 0; }
+    .x { background: #ff6b6b; } .y { background: #65e79b; } .z { background: #62a9ff; }
+
+    .hint {
+      position: absolute;
+      left: 22px;
+      bottom: 20px;
+      color: rgba(141, 165, 175, .7);
+      font: 10px/1.4 ui-monospace, monospace;
+    }
+
+    @media (max-width: 720px) {
+      body { overflow: auto; }
+      .app { display: block; }
+      aside { position: relative; padding: 20px; border-right: 0; border-bottom: 1px solid var(--line); }
+      main, canvas { height: 60vh; min-height: 390px; }
+      canvas { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <p class="eyebrow">Live orientation</p>
+      <h1>BNO055 Pose</h1>
+      <p class="sub">Raspberry Piから受信したクォータニオンで板の姿勢を描画しています。</p>
+
+      <div class="status" id="status"><span class="dot"></span><span id="statusText">接続中…</span></div>
+
+      <div class="section-title">Performance</div>
+      <div class="metrics">
+        <div class="metric"><span>センサ取得</span><strong id="sensorHz">— <small>Hz</small></strong></div>
+        <div class="metric"><span>画面描画</span><strong id="renderHz">— <small>Hz</small></strong></div>
+        <div class="metric"><span>受信</span><strong id="receiveHz">— <small>Hz</small></strong></div>
+        <div class="metric"><span>欠番</span><strong id="dropped">0</strong></div>
+        <div class="metric"><span>スパイク除去</span><strong id="spikes">0</strong></div>
+      </div>
+
+      <div class="section-title">Relative angle</div>
+      <div class="angles">
+        <div class="angle-row"><span>ROLL · X</span><strong id="roll">0.0°</strong></div>
+        <div class="angle-row"><span>PITCH · Y</span><strong id="pitch">0.0°</strong></div>
+        <div class="angle-row"><span>YAW · Z</span><strong id="yaw">0.0°</strong></div>
+      </div>
+
+      <div class="section-title">Calibration · 0–3</div>
+      <div class="calibration" id="calibration"></div>
+      <button id="recenter" type="button">現在の姿勢をゼロにする</button>
+    </aside>
+
+    <main>
+      <canvas id="pose"></canvas>
+      <div class="hint">表示はディスプレイのリフレッシュレートに同期</div>
+      <div class="axis-key"><span><i class="x"></i>X</span><span><i class="y"></i>Y</span><span><i class="z"></i>Z</span></div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+
+    const $ = (id) => document.getElementById(id);
+    const canvas = $("pose");
+    const ctx = canvas.getContext("2d");
+    const status = $("status");
+    let targetQ = [1, 0, 0, 0];
+    let renderQ = [1, 0, 0, 0];
+    let lastSequence = null;
+    let dropped = 0;
+    let receivedFrames = 0;
+    let renderedFrames = 0;
+    let lastRateTime = performance.now();
+    let lastFrameTime = performance.now();
+    let lastPacketTime = 0;
+
+    const calNames = [["system", "SYS"], ["gyro", "GYR"], ["accel", "ACC"], ["mag", "MAG"]];
+    $("calibration").innerHTML = calNames.map(([key, label]) =>
+      `<div class="cal-row"><span>${label}</span><div class="bars" id="cal-${key}">${[1, 2, 3].map(() => '<i class="bar"></i>').join("")}</div></div>`
+    ).join("");
+
+    function setStatus(kind, message) {
+      status.className = `status ${kind}`;
+      $("statusText").textContent = message;
+    }
+
+    function updateCalibration(cal) {
+      if (!cal) return;
+      for (const [key] of calNames) {
+        const value = Number(cal[key] || 0);
+        [...$(`cal-${key}`).children].forEach((bar, index) => bar.classList.toggle("on", index < value));
+      }
+    }
+
+    function normalize(q) {
+      const n = Math.hypot(...q) || 1;
+      return q.map((v) => v / n);
+    }
+
+    function slerp(a, b, t) {
+      let end = b;
+      let dot = a.reduce((sum, value, i) => sum + value * b[i], 0);
+      if (dot < 0) { end = b.map((v) => -v); dot = -dot; }
+      if (dot > .9995) return normalize(a.map((v, i) => v + t * (end[i] - v)));
+      const theta = Math.acos(Math.min(1, dot));
+      const sinTheta = Math.sin(theta);
+      const aa = Math.sin((1 - t) * theta) / sinTheta;
+      const bb = Math.sin(t * theta) / sinTheta;
+      return a.map((v, i) => aa * v + bb * end[i]);
+    }
+
+    function rotate(q, [x, y, z]) {
+      const [w, qx, qy, qz] = q;
+      const tx = 2 * (qy * z - qz * y);
+      const ty = 2 * (qz * x - qx * z);
+      const tz = 2 * (qx * y - qy * x);
+      return [
+        x + w * tx + qy * tz - qz * ty,
+        y + w * ty + qz * tx - qx * tz,
+        z + w * tz + qx * ty - qy * tx,
+      ];
+    }
+
+    function camera([x, y, z]) {
+      const cz = Math.cos(-.55), sz = Math.sin(-.55);
+      const x1 = x * cz - y * sz, y1 = x * sz + y * cz;
+      const cx = Math.cos(-.67), sx = Math.sin(-.67);
+      return [x1, y1 * cx - z * sx, y1 * sx + z * cx];
+    }
+
+    function resize() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = Math.min(devicePixelRatio || 1, 2);
+      canvas.width = Math.round(rect.width * dpr);
+      canvas.height = Math.round(rect.height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function project(point, width, height) {
+      const focal = Math.min(width, height) * 1.12;
+      const scale = focal / (5 - point[2]);
+      return [width * .5 + point[0] * scale, height * .48 - point[1] * scale, point[2]];
+    }
+
+    const vertices = [
+      [-1.8, -1.08, -.12], [1.8, -1.08, -.12], [1.8, 1.08, -.12], [-1.8, 1.08, -.12],
+      [-1.8, -1.08, .12], [1.8, -1.08, .12], [1.8, 1.08, .12], [-1.8, 1.08, .12],
+    ];
+    const faces = [
+      { ids: [0, 1, 2, 3], fill: "#19353d" }, { ids: [4, 7, 6, 5], fill: "#55cfc9" },
+      { ids: [0, 4, 5, 1], fill: "#287f82" }, { ids: [1, 5, 6, 2], fill: "#20666d" },
+      { ids: [2, 6, 7, 3], fill: "#2e9293" }, { ids: [3, 7, 4, 0], fill: "#174c54" },
+    ];
+
+    function draw(timestamp) {
+      const rect = canvas.getBoundingClientRect();
+      const width = rect.width, height = rect.height;
+      const dt = Math.min(.05, (timestamp - lastFrameTime) / 1000);
+      lastFrameTime = timestamp;
+      renderQ = slerp(renderQ, targetQ, 1 - Math.exp(-dt * 34));
+
+      ctx.clearRect(0, 0, width, height);
+      const transformed = vertices.map((v) => camera(rotate(renderQ, v)));
+      const projected = transformed.map((v) => project(v, width, height));
+      const orderedFaces = faces.map((face) => ({
+        ...face,
+        depth: face.ids.reduce((sum, id) => sum + transformed[id][2], 0) / face.ids.length,
+      })).sort((a, b) => a.depth - b.depth);
+
+      ctx.lineJoin = "round";
+      for (const face of orderedFaces) {
+        ctx.beginPath();
+        face.ids.forEach((id, i) => i ? ctx.lineTo(projected[id][0], projected[id][1]) : ctx.moveTo(projected[id][0], projected[id][1]));
+        ctx.closePath();
+        ctx.fillStyle = face.fill;
+        ctx.fill();
+        ctx.strokeStyle = "rgba(225, 255, 255, .35)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      const top = orderedFaces.find((face) => face.ids[0] === 4);
+      if (top && top.depth > -.1) {
+        const center = project(camera(rotate(renderQ, [0, 0, .125])), width, height);
+        ctx.fillStyle = "rgba(4, 30, 34, .75)";
+        ctx.font = "600 12px ui-monospace, monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("BNO055", center[0], center[1] + 4);
+      }
+
+      const origin = project(camera(rotate(renderQ, [0, 0, 0])), width, height);
+      const axes = [[[1.35, 0, 0], "#ff6b6b", "X"], [[0, 1.35, 0], "#65e79b", "Y"], [[0, 0, 1.35], "#62a9ff", "Z"]];
+      for (const [axis, color, label] of axes) {
+        const end = project(camera(rotate(renderQ, axis)), width, height);
+        ctx.beginPath(); ctx.moveTo(origin[0], origin[1]); ctx.lineTo(end[0], end[1]);
+        ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+        ctx.fillStyle = color; ctx.font = "700 11px ui-monospace, monospace"; ctx.fillText(label, end[0] + 6, end[1] - 5);
+      }
+
+      renderedFrames++;
+      if (timestamp - lastRateTime >= 1000) {
+        const elapsed = (timestamp - lastRateTime) / 1000;
+        $("renderHz").innerHTML = `${(renderedFrames / elapsed).toFixed(0)} <small>Hz</small>`;
+        $("receiveHz").innerHTML = `${(receivedFrames / elapsed).toFixed(0)} <small>Hz</small>`;
+        renderedFrames = 0;
+        receivedFrames = 0;
+        lastRateTime = timestamp;
+        if (lastPacketTime && performance.now() - lastPacketTime > 2500) setStatus("error", "データが停止しています");
+      }
+      requestAnimationFrame(draw);
+    }
+
+    function handlePacket(packet) {
+      if (packet.type === "error") {
+        setStatus("error", packet.message);
+        return;
+      }
+      if (packet.type !== "pose") return;
+      if (!Array.isArray(packet.quaternion_rel_wxyz) || packet.quaternion_rel_wxyz.length !== 4) return;
+      if (lastSequence !== null && packet.seq > lastSequence + 1) dropped += packet.seq - lastSequence - 1;
+      lastSequence = packet.seq;
+      targetQ = normalize(packet.quaternion_rel_wxyz.map(Number));
+      receivedFrames++;
+      lastPacketTime = performance.now();
+      $("dropped").textContent = String(dropped);
+      $("spikes").textContent = String(packet.spikes_suppressed_total || 0);
+      $("sensorHz").innerHTML = `${Number(packet.sample_hz || 0).toFixed(0)} <small>Hz</small>`;
+      const rpy = packet.rpy_rel_deg || {};
+      $("roll").textContent = `${Number(rpy.roll || 0).toFixed(1)}°`;
+      $("pitch").textContent = `${Number(rpy.pitch || 0).toFixed(1)}°`;
+      $("yaw").textContent = `${Number(rpy.yaw || 0).toFixed(1)}°`;
+      updateCalibration(packet.diagnostics && packet.diagnostics.calibration);
+      setStatus("online", `接続済み · sample ${packet.seq}`);
+    }
+
+    const streamWorker = new Worker("/bno055_stream_worker.js");
+    streamWorker.addEventListener("message", ({ data }) => {
+      if (data.type === "packet") handlePacket(data.packet);
+      if (data.type === "state") setStatus(data.connected ? "" : "error", data.message);
+    });
+
+    $("recenter").addEventListener("click", async () => {
+      try {
+        await fetch("/api/recenter", { method: "POST" });
+        renderQ = [1, 0, 0, 0];
+        targetQ = [1, 0, 0, 0];
+      } catch (error) {
+        setStatus("error", `ゼロ設定失敗 · ${error.message}`);
+      }
+    });
+
+    addEventListener("resize", resize);
+    resize();
+    requestAnimationFrame(draw);
+  </script>
+</body>
+</html>
