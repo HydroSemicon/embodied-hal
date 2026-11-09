@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>二波長NIRエタノール検出モニター</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #081016;
+      --panel: #101c24;
+      --panel-2: #152630;
+      --line: #28404c;
+      --text: #e8f3f5;
+      --muted: #91a8b1;
+      --cyan: #55d8d1;
+      --blue: #79aefc;
+      --amber: #ffbe5c;
+      --red: #ff6f6f;
+      --green: #6ce2a2;
+      --off: #43535b;
+      font-family: Inter, "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 85% 0, #16303a 0, var(--bg) 32%); color: var(--text); }
+    button { font: inherit; }
+    .shell { width: min(1440px, 100%); margin: 0 auto; padding: 24px; }
+    header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 20px; }
+    .eyebrow { color: var(--cyan); font: 700 12px ui-monospace, monospace; letter-spacing: .14em; text-transform: uppercase; }
+    h1 { margin: 7px 0 5px; font-size: clamp(24px, 3vw, 38px); line-height: 1.1; letter-spacing: -.03em; }
+    .subtitle { margin: 0; color: var(--muted); font-size: 14px; }
+    .status-row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 9px; }
+    .pill { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px; background: rgba(16, 28, 36, .86); color: var(--muted); font-size: 13px; }
+    .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--off); }
+    .pill.ok { color: var(--text); border-color: rgba(108, 226, 162, .35); }
+    .pill.ok .dot { background: var(--green); box-shadow: 0 0 12px rgba(108, 226, 162, .8); }
+    .pill.error { color: #ffd5d5; border-color: rgba(255, 111, 111, .45); }
+    .pill.error .dot { background: var(--red); box-shadow: 0 0 12px rgba(255, 111, 111, .7); }
+    .pill.warning { color: #ffe4b7; border-color: rgba(255, 190, 92, .5); }
+    .pill.warning .dot { background: var(--amber); box-shadow: 0 0 12px rgba(255, 190, 92, .7); }
+    .grid { display: grid; grid-template-columns: minmax(300px, 360px) minmax(0, 1fr); gap: 18px; }
+    .stack { display: grid; gap: 18px; align-content: start; }
+    .card { border: 1px solid var(--line); border-radius: 18px; background: linear-gradient(145deg, rgba(21, 38, 48, .98), rgba(12, 23, 30, .98)); box-shadow: 0 16px 42px rgba(0, 0, 0, .2); overflow: hidden; }
+    .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px 12px; border-bottom: 1px solid rgba(40, 64, 76, .7); }
+    .card-head h2 { margin: 0; font-size: 14px; letter-spacing: .04em; }
+    .card-head small { color: var(--muted); }
+    .led-control { padding: 16px 18px; }
+    .led-control + .led-control { border-top: 1px solid rgba(40, 64, 76, .65); }
+    .led-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 13px; }
+    .wavelength { font: 700 22px ui-monospace, monospace; }
+    .led-state { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+    .lamp { width: 11px; height: 11px; border-radius: 50%; background: var(--off); }
+    .led-state.on { color: var(--text); }
+    .led-state.on .lamp { background: var(--amber); box-shadow: 0 0 15px rgba(255, 190, 92, .9); }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+    .btn { min-height: 42px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: #1a303b; color: var(--text); cursor: pointer; transition: transform .12s, border-color .12s, background .12s; }
+    .btn:hover { transform: translateY(-1px); border-color: #55717e; background: #203b48; }
+    .btn:active { transform: translateY(0); }
+    .btn.primary { border-color: rgba(85, 216, 209, .45); background: rgba(34, 118, 119, .52); }
+    .btn.danger { width: 100%; margin-top: 14px; border-color: rgba(255, 111, 111, .55); background: rgba(125, 38, 43, .55); font-weight: 700; }
+    .hint { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    .metrics { display: grid; grid-template-columns: repeat(2, 1fr); }
+    .metric { min-width: 0; padding: 16px 18px; border-bottom: 1px solid rgba(40, 64, 76, .62); }
+    .metric:nth-child(odd) { border-right: 1px solid rgba(40, 64, 76, .62); }
+    .metric:nth-last-child(-n+2) { border-bottom: 0; }
+    .label { display: block; color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+    .value { display: block; margin-top: 8px; overflow: hidden; text-overflow: ellipsis; font: 650 22px ui-monospace, monospace; white-space: nowrap; }
+    .value.time { font-size: 13px; line-height: 1.45; white-space: normal; }
+    .value.clipped { color: var(--red); font-size: 15px; white-space: normal; }
+    .unit { color: var(--muted); font-size: 12px; font-weight: 500; }
+    .alert { display: none; margin-bottom: 18px; padding: 13px 16px; border: 1px solid rgba(255, 190, 92, .5); border-radius: 12px; background: rgba(105, 70, 18, .32); color: #ffe4b7; font-size: 13px; line-height: 1.55; white-space: pre-wrap; }
+    .alert.show { display: block; }
+    .chart-wrap { position: relative; height: 430px; padding: 8px 12px 10px 4px; }
+    canvas { display: block; width: 100%; height: 100%; }
+    .chart-legend { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+    .chart-legend i { display: block; width: 18px; height: 2px; background: var(--cyan); }
+    .record-body { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 15px 18px; }
+    .record-count { font: 700 20px ui-monospace, monospace; }
+    .record-count small { display: block; margin-top: 3px; color: var(--muted); font: 400 11px system-ui, sans-serif; }
+    .record-actions { display: flex; gap: 8px; }
+    @media (max-width: 880px) {
+      .shell { padding: 16px; }
+      header { display: block; }
+      .status-row { justify-content: flex-start; margin-top: 16px; }
+      .grid { grid-template-columns: 1fr; }
+      .chart-wrap { height: 340px; }
+    }
+    @media (max-width: 480px) {
+      .metrics { grid-template-columns: 1fr; }
+      .metric, .metric:nth-child(odd), .metric:nth-last-child(-n+2) { border-right: 0; border-bottom: 1px solid rgba(40, 64, 76, .62); }
+      .metric:last-child { border-bottom: 0; }
+      .record-body { align-items: stretch; flex-direction: column; }
+      .record-actions { display: grid; grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div>
+        <div class="eyebrow">MCP3425 · Dual wavelength NIR</div>
+        <h1>エタノール検出モニター</h1>
+        <p class="subtitle">Raspberry Pi GPIO制御・差動ADCリアルタイム監視</p>
+      </div>
+      <div class="status-row">
+        <div class="pill" id="piStatus"><span class="dot"></span><span id="piStatusText">接続中</span></div>
+        <div class="pill" id="adcStatus"><span class="dot"></span><span id="adcStatusText">ADC 起動中</span></div>
+      </div>
+    </header>
+
+    <div class="alert" id="alerts" role="alert"></div>
+
+    <div class="grid">
+      <aside class="stack">
+        <section class="card">
+          <div class="card-head"><h2>LED CONTROL</h2><small>排他制御</small></div>
+          <div class="led-control">
+            <div class="led-title">
+              <span class="wavelength">1450 nm</span>
+              <span class="led-state" id="state1450"><span class="lamp"></span><span>消灯</span></span>
+            </div>
+            <div class="actions">
+              <button class="btn primary" data-led="1450" data-enabled="true">点灯</button>
+              <button class="btn" data-led="1450" data-enabled="false">消灯</button>
+            </div>
+          </div>
+          <div class="led-control">
+            <div class="led-title">
+              <span class="wavelength">940 nm</span>
+              <span class="led-state" id="state940"><span class="lamp"></span><span>消灯</span></span>
+            </div>
+            <div class="actions">
+              <button class="btn primary" data-led="940" data-enabled="true">点灯</button>
+              <button class="btn" data-led="940" data-enabled="false">消灯</button>
+            </div>
+          </div>
+          <div style="padding: 0 18px 18px">
+            <button class="btn danger" id="allOff">両LEDを即座に消灯</button>
+            <p class="hint">片方を点灯すると、もう片方は先に自動消灯します。通信が5秒以上途絶えた場合も両LEDを消灯します。</p>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>LIVE VALUES</h2><small>16 bit · 15 SPS</small></div>
+          <div class="metrics">
+            <div class="metric"><span class="label">ADC生コード</span><span class="value" id="raw">—</span></div>
+            <div class="metric"><span class="label">差動電圧</span><span class="value" id="voltage">—</span></div>
+            <div class="metric"><span class="label">サンプリング</span><span class="value" id="sampleHz">—</span></div>
+            <div class="metric"><span class="label">取得時刻</span><span class="value time" id="capturedAt">—</span></div>
+            <div class="metric"><span class="label">ADC設定</span><span class="value time" id="adcConfig">—</span></div>
+            <div class="metric"><span class="label">入力範囲</span><span class="value time" id="saturationState">—</span></div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>CSV RECORDING</h2><small>ブラウザセッション</small></div>
+          <div class="record-body">
+            <div class="record-count"><span id="recordCount">0</span><small>保存中の測定点</small></div>
+            <div class="record-actions">
+              <button class="btn" id="clearCsv">クリア</button>
+              <button class="btn primary" id="downloadCsv">CSVダウンロード</button>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <main class="card">
+        <div class="card-head">
+          <h2>DIFFERENTIAL VOLTAGE · LAST 60 SECONDS</h2>
+          <span class="chart-legend"><i></i> MCP3425 VIN+ − VIN−</span>
+        </div>
+        <div class="chart-wrap"><canvas id="chart"></canvas></div>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    "use strict";
+    const $ = (id) => document.getElementById(id);
+    const clientId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+    const graphPoints = [];
+    const csvRows = [];
+    let lastPacketAt = 0;
+    let piConnected = false;
+    let serverWarnings = [];
+    let localWarning = "";
+    let latestLeds = { "1450": false, "940": false };
+
+    function setPill(element, textElement, kind, text) {
+      element.className = `pill ${kind || ""}`;
+      textElement.textContent = text;
+    }
+
+    function setLedStates(leds) {
+      if (!leds) return;
+      latestLeds = { "1450": Boolean(leds["1450"]), "940": Boolean(leds["940"]) };
+      for (const wavelength of ["1450", "940"]) {
+        const element = $(`state${wavelength}`);
+        const on = latestLeds[wavelength];
+        element.className = `led-state ${on ? "on" : ""}`;
+        element.lastElementChild.textContent = on ? "点灯中" : "消灯";
+      }
+    }
+
+    function renderAlerts() {
+      const messages = [...serverWarnings];
+      if (localWarning) messages.unshift(localWarning);
+      const unique = [...new Set(messages.filter(Boolean))];
+      $("alerts").textContent = unique.join("\n");
+      $("alerts").classList.toggle("show", unique.length > 0);
+    }
+
+    function applyStatus(status) {
+      if (!status) return;
+      setLedStates(status.leds);
+      serverWarnings = Array.isArray(status.warnings) ? status.warnings : [];
+      if (status.adc_status === "ok") {
+        setPill($("adcStatus"), $("adcStatusText"), "ok", "ADC 正常");
+      } else if (status.adc_status === "error") {
+        setPill($("adcStatus"), $("adcStatusText"), "error", "ADC 異常");
+      } else {
+        setPill($("adcStatus"), $("adcStatusText"), "", "ADC 起動中");
+      }
+      renderAlerts();
+    }
+
+    function handleSample(sample) {
+      const raw = Number(sample.adc_raw);
+      const voltage = Number(sample.differential_v);
+      if (!Number.isFinite(raw) || !Number.isFinite(voltage)) return;
+      const saturated = Boolean(sample.adc_saturated ?? sample.saturated);
+      const saturatedHigh = Boolean(sample.adc_saturated_high);
+      const saturatedLow = Boolean(sample.adc_saturated_low);
+      const nearSaturation = Boolean(sample.adc_near_saturation);
+      piConnected = true;
+      lastPacketAt = performance.now();
+      localWarning = "";
+      setPill($("piStatus"), $("piStatusText"), "ok", "Raspberry Pi 接続済み");
+      if (saturated) setPill($("adcStatus"), $("adcStatusText"), "error", "ADC 上限");
+      else if (nearSaturation) setPill($("adcStatus"), $("adcStatusText"), "warning", "ADC 上限付近");
+      else setPill($("adcStatus"), $("adcStatusText"), "ok", "ADC 正常");
+      setLedStates(sample.leds);
+      $("raw").textContent = raw.toLocaleString("ja-JP");
+      $("voltage").className = `value ${saturated ? "clipped" : ""}`;
+      if (saturatedHigh) $("voltage").textContent = "ADC上限（入力 ≥ 約2.048 V）";
+      else if (saturatedLow) $("voltage").textContent = "ADC下限（入力 ≤ 約−2.048 V）";
+      else $("voltage").innerHTML = `${voltage.toFixed(6)} <span class="unit">V</span>`;
+      $("sampleHz").innerHTML = `${Number(sample.sample_hz || 0).toFixed(1)} <span class="unit">SPS</span>`;
+      $("capturedAt").textContent = new Date(Number(sample.unix_s) * 1000).toLocaleString("ja-JP", { hour12: false });
+      const configHex = `0x${Number(sample.adc_config_byte ?? 0).toString(16).padStart(2, "0").toUpperCase()}`;
+      $("adcConfig").textContent = `${sample.adc_resolution_bits ?? "?"} bit · PGA×${sample.adc_pga ?? "?"} · ${configHex}`;
+      $("saturationState").textContent = saturated ? "飽和（測定値として無効）" : (nearSaturation ? "上限2%以内" : "正常範囲");
+      $("saturationState").className = `value time ${saturated ? "clipped" : ""}`;
+
+      graphPoints.push({ t: Number(sample.unix_s), v: voltage, clipped: saturated });
+      const cutoff = Number(sample.unix_s) - 60;
+      while (graphPoints.length && graphPoints[0].t < cutoff) graphPoints.shift();
+      csvRows.push({
+        timestamp: sample.timestamp,
+        unix_s: Number(sample.unix_s),
+        raw,
+        voltage,
+        configByte: Number(sample.adc_config_byte),
+        resolutionBits: Number(sample.adc_resolution_bits),
+        pga: Number(sample.adc_pga),
+        saturated,
+        nearSaturation,
+        led1450: Boolean(sample.leds && sample.leds["1450"]),
+        led940: Boolean(sample.leds && sample.leds["940"]),
+      });
+      $("recordCount").textContent = csvRows.length.toLocaleString("ja-JP");
+      serverWarnings = Array.isArray(sample.warnings) ? [...sample.warnings] : [];
+      if (saturated) serverWarnings.push("ADC上限または下限です。この点はクリップされており、有効な測定値ではありません。");
+      else if (nearSaturation) serverWarnings.push("ADC入力が16 bitフルスケールの2%以内です。飽和余裕を確認してください。");
+      renderAlerts();
+    }
+
+    async function postJson(url, payload) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      return body;
+    }
+
+    async function commandLed(wavelength, enabled) {
+      try {
+        const body = await postJson("/api/led", { client_id: clientId, wavelength, enabled });
+        setLedStates(body.leds);
+        localWarning = "";
+      } catch (error) {
+        localWarning = `LED操作に失敗しました: ${error.message}`;
+        renderAlerts();
+      }
+    }
+
+    document.querySelectorAll("[data-led]").forEach((button) => {
+      button.addEventListener("click", () => commandLed(button.dataset.led, button.dataset.enabled === "true"));
+    });
+
+    $("allOff").addEventListener("click", async () => {
+      try {
+        const body = await postJson("/api/leds/off", {});
+        setLedStates(body.leds);
+        localWarning = "";
+      } catch (error) {
+        localWarning = `緊急消灯に失敗しました: ${error.message}`;
+        renderAlerts();
+      }
+    });
+
+    async function sendHeartbeat() {
+      try {
+        const body = await postJson("/api/client/heartbeat", { client_id: clientId });
+        setLedStates(body.leds);
+      } catch (error) {
+        localWarning = `制御ハートビート失敗: ${error.message}`;
+        renderAlerts();
+      }
+    }
+
+    function csvEscape(value) {
+      const text = String(value);
+      return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+    }
+
+    $("downloadCsv").addEventListener("click", () => {
+      if (!csvRows.length) {
+        localWarning = "ダウンロードできる測定データがまだありません。";
+        renderAlerts();
+        return;
+      }
+      const header = [
+        "timestamp", "unix_s", "raw_code", "differential_v", "adc_config_hex",
+        "adc_resolution_bits", "adc_pga", "adc_saturated", "adc_near_saturation",
+        "led_1450", "led_940",
+      ];
+      const lines = csvRows.map((row) => [
+        row.timestamp,
+        row.unix_s.toFixed(6),
+        row.raw,
+        row.voltage.toFixed(9),
+        `0x${row.configByte.toString(16).padStart(2, "0").toUpperCase()}`,
+        row.resolutionBits,
+        row.pga,
+        row.saturated,
+        row.nearSaturation,
+        row.led1450 ? "on" : "off",
+        row.led940 ? "on" : "off",
+      ].map(csvEscape).join(","));
+      const blob = new Blob(["\ufeff", header.join(","), "\r\n", lines.join("\r\n"), "\r\n"], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `ethanol_detector_${new Date().toISOString().replaceAll(":", "-")}.csv`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    });
+
+    $("clearCsv").addEventListener("click", () => {
+      csvRows.length = 0;
+      $("recordCount").textContent = "0";
+      localWarning = "";
+      renderAlerts();
+    });
+
+    const canvas = $("chart");
+    const ctx = canvas.getContext("2d");
+
+    function resizeCanvas() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = Math.min(devicePixelRatio || 1, 2);
+      const width = Math.max(1, Math.round(rect.width * dpr));
+      const height = Math.max(1, Math.round(rect.height * dpr));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+    }
+
+    function drawChart() {
+      resizeCanvas();
+      const { width, height } = canvas.getBoundingClientRect();
+      const pad = { left: 66, right: 18, top: 20, bottom: 38 };
+      const plotW = Math.max(1, width - pad.left - pad.right);
+      const plotH = Math.max(1, height - pad.top - pad.bottom);
+      ctx.clearRect(0, 0, width, height);
+      ctx.font = "11px ui-monospace, monospace";
+      ctx.lineWidth = 1;
+
+      const valuesMv = graphPoints.map((point) => point.v * 1000);
+      let minV = valuesMv.length ? Math.min(...valuesMv) : -1;
+      let maxV = valuesMv.length ? Math.max(...valuesMv) : 1;
+      if (maxV - minV < 0.02) {
+        const center = (minV + maxV) / 2;
+        minV = center - 0.01;
+        maxV = center + 0.01;
+      } else {
+        const margin = (maxV - minV) * 0.12;
+        minV -= margin;
+        maxV += margin;
+      }
+      const newest = graphPoints.length ? graphPoints[graphPoints.length - 1].t : Date.now() / 1000;
+      const start = newest - 60;
+      const x = (t) => pad.left + ((t - start) / 60) * plotW;
+      const y = (v) => pad.top + (1 - (v - minV) / (maxV - minV)) * plotH;
+
+      for (let i = 0; i <= 6; i++) {
+        const px = pad.left + (i / 6) * plotW;
+        ctx.strokeStyle = "rgba(87, 121, 135, .18)";
+        ctx.beginPath(); ctx.moveTo(px, pad.top); ctx.lineTo(px, pad.top + plotH); ctx.stroke();
+        ctx.fillStyle = "#91a8b1";
+        ctx.textAlign = "center";
+        ctx.fillText(`${-60 + i * 10}s`, px, pad.top + plotH + 23);
+      }
+      for (let i = 0; i <= 4; i++) {
+        const py = pad.top + (i / 4) * plotH;
+        const label = maxV - (i / 4) * (maxV - minV);
+        ctx.strokeStyle = "rgba(87, 121, 135, .18)";
+        ctx.beginPath(); ctx.moveTo(pad.left, py); ctx.lineTo(pad.left + plotW, py); ctx.stroke();
+        ctx.fillStyle = "#91a8b1";
+        ctx.textAlign = "right";
+        ctx.fillText(label.toFixed(3), pad.left - 9, py + 4);
+      }
+      ctx.save();
+      ctx.translate(14, pad.top + plotH / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillStyle = "#91a8b1";
+      ctx.textAlign = "center";
+      ctx.fillText("差動電圧 [mV]", 0, 0);
+      ctx.restore();
+
+      if (minV <= 0 && maxV >= 0) {
+        ctx.strokeStyle = "rgba(255, 190, 92, .45)";
+        ctx.beginPath(); ctx.moveTo(pad.left, y(0)); ctx.lineTo(pad.left + plotW, y(0)); ctx.stroke();
+      }
+      if (graphPoints.length > 1) {
+        ctx.strokeStyle = "#55d8d1";
+        ctx.lineWidth = 2;
+        ctx.lineJoin = "round";
+        ctx.beginPath();
+        let drawing = false;
+        graphPoints.forEach((point) => {
+          const px = x(point.t), py = y(point.v * 1000);
+          if (point.clipped) {
+            drawing = false;
+          } else if (!drawing) {
+            ctx.moveTo(px, py);
+            drawing = true;
+          } else {
+            ctx.lineTo(px, py);
+          }
+        });
+        ctx.stroke();
+        ctx.fillStyle = "#ff6f6f";
+        graphPoints.filter((point) => point.clipped).forEach((point) => {
+          ctx.beginPath();
+          ctx.arc(x(point.t), y(point.v * 1000), 3.5, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      }
+    }
+
+    const worker = new Worker("/ethanol_detector_stream_worker.js");
+    worker.addEventListener("message", ({ data }) => {
+      if (data.type === "state" && !data.connected) {
+        piConnected = false;
+        setPill($("piStatus"), $("piStatusText"), "error", data.message);
+        return;
+      }
+      if (data.type !== "packet") return;
+      const packet = data.packet;
+      piConnected = true;
+      lastPacketAt = performance.now();
+      setPill($("piStatus"), $("piStatusText"), "ok", "Raspberry Pi 接続済み");
+      if (packet.type === "sample") handleSample(packet);
+      else if (packet.type === "heartbeat") applyStatus(packet.status);
+      else if (packet.type === "error") {
+        applyStatus(packet.status);
+        localWarning = `ADC通信エラー: ${packet.message}`;
+        renderAlerts();
+      }
+    });
+
+    setInterval(drawChart, 100);
+    setInterval(sendHeartbeat, 1000);
+    setInterval(() => {
+      if (piConnected && lastPacketAt && performance.now() - lastPacketAt > 2500) {
+        piConnected = false;
+        setPill($("piStatus"), $("piStatusText"), "error", "データ受信停止");
+      }
+    }, 500);
+    addEventListener("resize", drawChart);
+    addEventListener("pagehide", () => {
+      const body = new Blob([JSON.stringify({ client_id: clientId })], { type: "application/json" });
+      navigator.sendBeacon("/api/client/release", body);
+    });
+    sendHeartbeat();
+    drawChart();
+  </script>
+</body>
+</html>
