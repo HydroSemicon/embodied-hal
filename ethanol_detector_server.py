@@ -41,6 +41,10 @@ class ADCConfigurationError(Exception):
     """Raised before conversion when the MCP3425 is not in the required mode."""
 
 
+class InvalidControlRequest(ValueError):
+    """Raised when a control request has invalid fields or values."""
+
+
 class MCP3425ADC:
     """Minimal MCP3425 driver for continuous 16-bit, 15-SPS, PGA x1 mode."""
 
@@ -221,10 +225,10 @@ class LedController:
         self.states = {"1450": False, "940": False}
 
     def set_led(self, wavelength, enabled):
-        if wavelength not in self.PINS:
-            raise ValueError("wavelength must be '1450' or '940'")
+        if not isinstance(wavelength, str) or wavelength not in self.PINS:
+            raise InvalidControlRequest("wavelength must be '1450' or '940'")
         if type(enabled) is not bool:
-            raise ValueError("enabled must be a boolean")
+            raise InvalidControlRequest("enabled must be a boolean")
         with self.lock:
             if self.closed:
                 raise RuntimeError("LED controller is closed")
@@ -302,7 +306,7 @@ class EthanolDetectorService:
 
     def _validate_client_id(self, client_id):
         if not isinstance(client_id, str) or not client_id.strip() or len(client_id) > 128:
-            raise ValueError("client_id must be a non-empty string of at most 128 characters")
+            raise InvalidControlRequest("client_id must be a non-empty string of at most 128 characters")
         return client_id.strip()
 
     def heartbeat(self, client_id):
@@ -321,8 +325,11 @@ class EthanolDetectorService:
             self.safety_message = None
         try:
             states = self.leds.set_led(wavelength, enabled)
-        except Exception as exc:
-            self._fail_safe(f"LED GPIO exception: {exc}")
+        except InvalidControlRequest:
+            self._fail_safe("Invalid LED command; both LEDs were commanded off.")
+            raise
+        except Exception:
+            self._fail_safe("LED GPIO operation failed; both LEDs were commanded off.")
             raise
         with self.condition:
             self.condition.notify_all()
@@ -423,11 +430,14 @@ class EthanolDetectorService:
                     self.condition.notify_all()
             except ConversionNotReady:
                 pass
-            except Exception as exc:
+            except Exception:
+                self._fail_safe("ADC measurement failed; both LEDs were commanded off.")
                 with self.condition:
-                    self.adc_error = str(exc)
+                    first_failure = self.adc_error is None
+                    self.adc_error = "ADC measurement failed."
                     self.condition.notify_all()
-                self._fail_safe(f"ADC exception: {exc}; both LEDs were turned off.")
+                if first_failure:
+                    LOGGER.exception("ADC measurement failed")
 
             next_deadline += self.period_s
             delay = next_deadline - time.monotonic()
@@ -507,10 +517,10 @@ class EthanolDetectorService:
 
 def _json_object():
     if not request.is_json:
-        raise ValueError("Request body must be JSON")
+        raise InvalidControlRequest
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
-        raise ValueError("Request body must be a JSON object")
+        raise InvalidControlRequest
     return payload
 
 
@@ -555,42 +565,44 @@ def create_app(service, viewer_path=None):
         try:
             payload = _json_object()
             if set(payload) != {"client_id", "wavelength", "enabled"}:
-                raise ValueError("Expected exactly: client_id, wavelength, enabled")
+                raise InvalidControlRequest
             states = service.command_led(payload["client_id"], payload["wavelength"], payload["enabled"])
             return jsonify(status="ok", leds=states)
-        except ValueError as exc:
-            return jsonify(error=str(exc)), 400
-        except Exception as exc:
-            return jsonify(error=str(exc)), 500
+        except InvalidControlRequest:
+            return jsonify(error="Invalid LED command. Expected a client ID, wavelength, and boolean enabled."), 400
+        except Exception:
+            LOGGER.exception("LED command failed")
+            return jsonify(error="LED command failed."), 500
 
     @app.post("/api/leds/off")
     def leds_off():
         try:
             return jsonify(status="ok", leds=service.emergency_off())
-        except Exception as exc:
-            return jsonify(error=str(exc)), 500
+        except Exception:
+            LOGGER.exception("Could not turn both LEDs off")
+            return jsonify(error="Could not turn both LEDs off."), 500
 
     @app.post("/api/client/heartbeat")
     def client_heartbeat():
         try:
             payload = _json_object()
             if set(payload) != {"client_id"}:
-                raise ValueError("Expected exactly: client_id")
+                raise InvalidControlRequest
             is_controller = service.heartbeat(payload["client_id"])
             return jsonify(status="ok", is_controller=is_controller, leds=service.leds.snapshot())
-        except ValueError as exc:
-            return jsonify(error=str(exc)), 400
+        except InvalidControlRequest:
+            return jsonify(error="Invalid heartbeat request. Expected a client ID."), 400
 
     @app.post("/api/client/release")
     def client_release():
         try:
             payload = _json_object()
             if set(payload) != {"client_id"}:
-                raise ValueError("Expected exactly: client_id")
+                raise InvalidControlRequest
             released = service.release_client(payload["client_id"])
             return jsonify(status="ok", released=released, leds=service.leds.snapshot())
-        except ValueError as exc:
-            return jsonify(error=str(exc)), 400
+        except InvalidControlRequest:
+            return jsonify(error="Invalid release request. Expected a client ID."), 400
 
     @app.get("/api/stream")
     def stream():

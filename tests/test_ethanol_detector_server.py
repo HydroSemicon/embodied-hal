@@ -1,3 +1,4 @@
+import json
 import time
 
 import pytest
@@ -264,17 +265,25 @@ def test_client_timeout_forces_both_leds_off():
         service.close()
 
 
-def test_adc_exception_forces_both_leds_off_and_reports_error():
+def test_adc_exception_forces_both_leds_off_and_reports_error(caplog):
     service, adc, _ = make_service()
+    client = create_app(service).test_client()
     service.start()
     try:
         service.command_led("browser-a", "940", True)
-        adc.error = "I2C bus failed"
+        adc.error = "private I2C diagnostic"
         assert wait_until(lambda: service.status_snapshot()["adc_status"] == "error")
-        status = service.status_snapshot()
+        status = client.get("/api/status").get_json()
         assert status["leds"] == {"1450": False, "940": False}
-        assert status["adc_error"] == "I2C bus failed"
-        assert any("both LEDs were turned off" in warning for warning in status["warnings"])
+        assert status["adc_error"] == "ADC measurement failed."
+        assert any("both LEDs were commanded off" in warning for warning in status["warnings"])
+        assert adc.error not in json.dumps(status)
+        with client.get("/api/stream", buffered=False) as stream:
+            packet = json.loads(next(iter(stream.response)))
+            assert packet["type"] == "error"
+            assert packet["message"] == status["adc_error"]
+            assert adc.error not in json.dumps(packet)
+        assert wait_until(lambda: adc.error in caplog.text)
     finally:
         service.close()
 
@@ -315,6 +324,29 @@ def test_http_commands_are_strict_and_exclusive():
     assert off.status_code == 200
     assert off.get_json()["leds"] == {"1450": False, "940": False}
     service.close()
+
+
+def test_gpio_exception_is_logged_without_leaking_to_clients(monkeypatch, caplog):
+    service, _, gpio = make_service()
+    client = create_app(service).test_client()
+    output = gpio.output
+
+    def fail_to_turn_on(pin, value):
+        if value == gpio.HIGH:
+            raise ValueError("private GPIO diagnostic")
+        output(pin, value)
+
+    monkeypatch.setattr(gpio, "output", fail_to_turn_on)
+    try:
+        response = client.post("/api/led", json={"client_id": "browser-a", "wavelength": "1450", "enabled": True})
+        assert response.status_code == 500
+        assert response.get_json() == {"error": "LED command failed."}
+        status = client.get("/api/status").get_json()
+        assert status["leds"] == {"1450": False, "940": False}
+        assert "private GPIO diagnostic" not in json.dumps(status)
+        assert "private GPIO diagnostic" in caplog.text
+    finally:
+        service.close()
 
 
 @pytest.mark.parametrize("value, expected", [("0x68", 0x68), ("104", 0x68), ("0x00", 0)])
