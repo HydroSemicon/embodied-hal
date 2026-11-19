@@ -23,6 +23,7 @@ The service is a deployment-specific hardware adapter, not a general-purpose dev
 | Device diagnostics | Partially implemented | Detailed BME280 and touch status; CdS and actuator diagnostics remain implicit |
 | Authentication and transport security | Not implemented | The HTTP surface is intended for a trusted private network |
 | Nine-axis IMU | Optional tool | BNO055 pose is streamed at up to 100 Hz to a browser-based 3D monitor |
+| Dual-wavelength NIR detector | Optional tool | MCP3425 differential samples and mutually exclusive 1450/940 nm LED control are exposed in a browser monitor |
 
 ## Architectural model
 
@@ -128,6 +129,19 @@ python3 bno055_pose.py --sample-hz 100
 ```
 
 On Windows, open `http://192.168.0.118:5002/` in Chrome or Edge. Flask serves the viewer HTML and its Web Worker JavaScript from the Raspberry Pi, so no client files or Python environment are needed on Windows. Sensor data is capped at 100 Hz by the BNO055 fusion output; rendering follows the display refresh rate and therefore reaches approximately 60 or 120 FPS on a matching display. See [`bno055_setup.md`](bno055_setup.md) for setup, calibration behavior, and command options.
+
+## Dual-wavelength ethanol detector monitor
+
+The optional ethanol-detector tool runs on the Raspberry Pi and serves its controller directly to a Windows browser. It writes and verifies the MCP3425 configuration for continuous 16-bit, 15-SPS, PGA x1 differential conversion, discards samples received under any other configuration, and controls active-high 1450 nm and 940 nm LED MOSFET gates on BCM GPIO17 and GPIO18. LED commands are mutually exclusive. Startup, shutdown, ADC/GPIO exceptions, and a control-client heartbeat timeout all force both outputs low.
+
+On the Raspberry Pi:
+
+```bash
+python3 -m pip install -r requirements-ethanol-detector-server.txt
+python3 ethanol_detector_server.py --address 0x68
+```
+
+On Windows, open `http://192.168.0.118:5003/` in Chrome or Edge. The page provides LED controls and state, Pi/ADC health, a 10-FPS graph covering the latest 60 seconds, live raw code/voltage/time/sample-rate values, explicit clipping and near-saturation warnings, and browser-session CSV download including ADC configuration and saturation fields. See [`ethanol_detector_setup.md`](ethanol_detector_setup.md) for wiring, the required 1450 nm current-limiting resistor change, address discovery, configuration, validation, and safety behavior.
 
 ## Physical bindings
 
