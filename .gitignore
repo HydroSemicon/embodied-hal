@@ -3,3 +3,5 @@ __pycache__/
 .venv/
 .pytest_cache/
 bno055_calibration.json
+.ipynb_checkpoints/
+**/.jupyter/desktop-workspaces/
